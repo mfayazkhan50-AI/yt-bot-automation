@@ -1,0 +1,6 @@
+undetected-chromedriver>=3.5.0
+selenium>=4.9.0
+google-api-python-client>=2.0.0
+groq>=0.4.0
+flask>=3.0.0
+python-dotenv>=1.0.0

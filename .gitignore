@@ -1,0 +1,7 @@
+.env
+config.json
+client_secret.json
+__pycache__/
+*.pyc
+comment_fail.png
+*.log

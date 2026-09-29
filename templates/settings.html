@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - YouTube Auto Comment</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Settings</h1>
+            <a href="/" class="settings-btn">Back to Dashboard</a>
+        </header>
+
+        <div class="tabs">
+            <button class="tab active" onclick="showTab('api')">API Keys</button>
+            {% for key, biz in config.businesses.items() %}
+            <button class="tab" onclick="showTab('{{ key }}')">{{ biz.name }}</button>
+            {% endfor %}
+        </div>
+
+        <form id="settingsForm" method="POST">
+            <div id="api" class="tab-content active">
+                <h3>Global Settings</h3>
+                <div class="form-group">
+                    <label>YouTube API Key</label>
+                    <input type="text" name="youtube_api_key" value="{{ config.youtube_api_key }}" class="input">
+                </div>
+                <div class="form-group">
+                    <label>Groq API Key</label>
+                    <input type="text" name="groq_api_key" value="{{ config.groq_api_key }}" class="input">
+                </div>
+                <div class="form-group">
+                    <label>Groq Model</label>
+                    <input type="text" name="groq_model" value="{{ config.get('groq_model', 'llama-3.3-70b-versatile') }}" class="input">
+                </div>
+            </div>
+
+            {% for key, biz in config.businesses.items() %}
+            <div id="{{ key }}" class="tab-content">
+                <h3>{{ biz.name }} Settings</h3>
+                <input type="hidden" name="business_key" value="{{ key }}">
+
+                <div class="form-group">
+                    <label>Business Name</label>
+                    <input type="text" name="biz_name" value="{{ biz.name }}" class="input">
+                </div>
+                <div class="form-group">
+                    <label>Keywords (comma separated)</label>
+                    <input type="text" name="keywords" value="{{ biz.keywords | join(', ') }}" class="input">
+                </div>
+                <div class="form-group">
+                    <label>Max Videos</label>
+                    <input type="number" name="max_videos" value="{{ biz.max_videos }}" class="input">
+                </div>
+                <div class="form-group">
+                    <label>Comments Per Account</label>
+                    <input type="number" name="comments_per_account" value="{{ biz.comments_per_account }}" class="input">
+                </div>
+                <div class="form-group">
+                    <label>Min Delay (seconds)</label>
+                    <input type="number" name="delay_min_seconds" value="{{ biz.delay_min_seconds }}" class="input">
+                </div>
+                <div class="form-group">
+                    <label>Max Delay (seconds)</label>
+                    <input type="number" name="delay_max_seconds" value="{{ biz.delay_max_seconds }}" class="input">
+                </div>
+
+                <h4>Business Info</h4>
+                <div class="form-group">
+                    <label>Business Type</label>
+                    <input type="text" name="biz_type" value="{{ biz.business_info.get('Business Type', '') }}" class="input">
+                </div>
+                <div class="form-group">
+                    <label>Website</label>
+                    <input type="text" name="biz_website" value="{{ biz.business_info.get('Website', '') }}" class="input">
+                </div>
+                <div class="form-group">
+                    <label>Phone</label>
+                    <input type="text" name="biz_phone" value="{{ biz.business_info.get('Phone', '') }}" class="input">
+                </div>
+                <div class="form-group">
+                    <label>Location</label>
+                    <input type="text" name="biz_location" value="{{ biz.business_info.get('Location', '') }}" class="input">
+                </div>
+                <div class="form-group">
+                    <label>Services</label>
+                    <input type="text" name="biz_services" value="{{ biz.business_info.get('Services', '') }}" class="input">
+                </div>
+                <div class="form-group">
+                    <label>Unique Selling Point</label>
+                    <input type="text" name="biz_usp" value="{{ biz.business_info.get('Unique Selling Point', '') }}" class="input">
+                </div>
+
+                <h4>Google Accounts</h4>
+                <div id="accounts-{{ key }}">
+                    {% for acc in biz.accounts %}
+                    <div class="account-row">
+                        <input type="email" name="account_email[]" value="{{ acc.email }}" placeholder="Email" class="input">
+                        <input type="password" name="account_password[]" value="{{ acc.password }}" placeholder="Password" class="input">
+                        <button type="button" class="remove-btn" onclick="this.parentElement.remove()">Remove</button>
+                    </div>
+                    {% endfor %}
+                </div>
+                <button type="button" class="add-btn" onclick="addAccount('{{ key }}')">+ Add Account</button>
+            </div>
+            {% endfor %}
+
+            <button type="submit" class="save-btn">Save Settings</button>
+        </form>
+
+        <div id="successMsg" class="success-msg" style="display:none;">Settings saved successfully!</div>
+    </div>
+
+    <script>
+        function showTab(tabId) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            event.target.classList.add('active');
+            document.getElementById(tabId).classList.add('active');
+        }
+
+        function addAccount(bizKey) {
+            const div = document.createElement('div');
+            div.className = 'account-row';
+            div.innerHTML = `
+                <input type="email" name="account_email[]" placeholder="Email" class="input">
+                <input type="password" name="account_password[]" placeholder="Password" class="input">
+                <button type="button" class="remove-btn" onclick="this.parentElement.remove()">Remove</button>
+            `;
+            document.getElementById('accounts-' + bizKey).appendChild(div);
+        }
+
+        document.getElementById('settingsForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const formData = new FormData(this);
+
+            fetch('/settings', {
+                method: 'POST',
+                body: formData
+            }).then(r => r.json()).then(d => {
+                if (d.success) {
+                    const msg = document.getElementById('successMsg');
+                    msg.style.display = 'block';
+                    setTimeout(() => msg.style.display = 'none', 3000);
+                }
+            });
+        });
+    </script>
+</body>
+</html>

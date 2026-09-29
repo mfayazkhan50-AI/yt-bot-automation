@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube Auto Comment - Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>YouTube Auto Comment</h1>
+            <a href="/settings" class="settings-btn">Settings</a>
+        </header>
+
+        <div class="business-switcher">
+            {% for key, biz in businesses.items() %}
+            <button class="biz-btn {% if key == active %}active{% endif %}"
+                    onclick="switchBusiness('{{ key }}')">
+                {{ biz.name }}
+            </button>
+            {% endfor %}
+        </div>
+
+        <div class="status-section">
+            <div class="status-card">
+                <h3>Status</h3>
+                <span id="status" class="{% if status.running %}running{% else %}stopped{% endif %}">
+                    {{ "Running" if status.running else "Stopped" }}
+                </span>
+            </div>
+            <div class="status-card">
+                <h3>Business</h3>
+                <span id="current-biz">{{ businesses[active].name if active in businesses else "Loading..." }}</span>
+            </div>
+            <div class="status-card">
+                <h3>Current Cycle</h3>
+                <span id="current-biz-index">Business {{ config.active_business or "1" }}</span>
+            </div>
+            <div class="status-card">
+                <h3>Today's Comments</h3>
+                <span id="today-comments">{{ status.today_comments }}/30</span>
+            </div>
+            <div class="status-card">
+                <h3>Last Run</h3>
+                <span id="last-run">{{ status.last_run or "Never" }}</span>
+            </div>
+        </div>
+
+        <div class="logs-section">
+            <h3>Live Logs</h3>
+            <div id="logs" class="logs-container">
+                {% for log in status.logs %}
+                <div class="log-entry">{{ log }}</div>
+                {% endfor %}
+                {% if not status.logs %}
+                <div class="log-entry">Bot is running automatically. Logs will appear here.</div>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="config-preview">
+            <h3>Current Config</h3>
+            <div class="config-details">
+                <p><strong>Keywords:</strong> {{ businesses[active].keywords | join(', ') }}</p>
+                <p><strong>Max Videos:</strong> {{ businesses[active].max_videos }}</p>
+                <p><strong>Comments/Account:</strong> {{ businesses[active].comments_per_account }}</p>
+                <p><strong>Daily Limit:</strong> {{ businesses[active].daily_limit }}</p>
+                <p><strong>Accounts:</strong> {{ businesses[active].accounts | length }}</p>
+                <p><strong>Business Website:</strong> {{ businesses[active].business_info.get('Website', 'N/A') }}</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function switchBusiness(key) {
+            fetch('/api/switch_business', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({business: key})
+            }).then(() => location.reload());
+        }
+
+        function updateStatus() {
+            fetch('/api/status')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('status').textContent = data.running ? 'Running' : 'Stopped';
+                    document.getElementById('status').className = data.running ? 'running' : 'stopped';
+                    document.getElementById('today-comments').textContent = data.today_comments + '/' + data.daily_limit;
+                    document.getElementById('last-run').textContent = data.last_run || 'Never';
+
+                    const logsEl = document.getElementById('logs');
+                    logsEl.innerHTML = '';
+                    data.logs.forEach(log => {
+                        const div = document.createElement('div');
+                        div.className = 'log-entry';
+                        div.textContent = log;
+                        logsEl.appendChild(div);
+                    });
+                    logsEl.scrollTop = logsEl.scrollHeight;
+                });
+        }
+
+        setInterval(updateStatus, 5000);
+    </script>
+</body>
+</html>

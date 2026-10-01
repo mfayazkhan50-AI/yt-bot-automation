@@ -1,0 +1,39 @@
+[Unit]
+Description=YouTube Auto Comment Bot (yt-bot)
+After=network-online.target
+Wants=network-online.target
+# Allow restarts to recover from a bad deploy, but stop hammering if it crash-loops.
+StartLimitIntervalSec=600
+StartLimitBurst=30
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/yt-bot-automation
+
+# PYTHONUNBUFFERED keeps stdout (and therefore `journalctl -f`) live.
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/root/yt-bot-automation
+
+ExecStart=/root/yt-bot-automation/venv/bin/python /root/yt-bot-automation/app.py
+
+# Always come back: crash, OOM kill, or VPS reboot.
+Restart=always
+RestartSec=15
+
+# app.py handles SIGTERM itself (stops the bot loop, then exits).
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=45
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yt-bot
+
+# Light hardening. Deliberately not using ProtectSystem=strict because the bot
+# must keep writing bot.log and bot_state.json inside the project directory.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

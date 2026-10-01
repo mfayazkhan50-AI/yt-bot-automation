@@ -14,13 +14,15 @@
         </header>
 
         <div class="tabs">
-            <button class="tab active" onclick="showTab('api')">API Keys</button>
+            <button class="tab active" onclick="showTab('api', this)">API Keys</button>
             {% for key, biz in config.businesses.items() %}
-            <button class="tab" onclick="showTab('{{ key }}')">{{ biz.name }}</button>
+            <button class="tab" onclick="showTab('{{ key }}', this)">{{ biz.name }}</button>
             {% endfor %}
         </div>
 
         <form id="settingsForm" method="POST">
+            <input type="hidden" name="business_key" id="activeBusinessKey" value="{{ config.active_business }}">
+
             <div id="api" class="tab-content active">
                 <h3>Global Settings</h3>
                 <div class="form-group">
@@ -28,19 +30,18 @@
                     <input type="text" name="youtube_api_key" value="{{ config.youtube_api_key }}" class="input">
                 </div>
                 <div class="form-group">
-                    <label>Groq API Key</label>
-                    <input type="text" name="groq_api_key" value="{{ config.groq_api_key }}" class="input">
+                    <label>OpenRouter API Key</label>
+                    <input type="text" value="stored in .env (OPENROUTER_API_KEY)" class="input" disabled>
                 </div>
                 <div class="form-group">
-                    <label>Groq Model</label>
-                    <input type="text" name="groq_model" value="{{ config.get('groq_model', 'llama-3.3-70b-versatile') }}" class="input">
+                    <label>LLM Model</label>
+                    <input type="text" value="{{ llm_model }}" class="input" disabled>
                 </div>
             </div>
 
             {% for key, biz in config.businesses.items() %}
             <div id="{{ key }}" class="tab-content">
                 <h3>{{ biz.name }} Settings</h3>
-                <input type="hidden" name="business_key" value="{{ key }}">
 
                 <div class="form-group">
                     <label>Business Name</label>
@@ -51,12 +52,28 @@
                     <input type="text" name="keywords" value="{{ biz.keywords | join(', ') }}" class="input">
                 </div>
                 <div class="form-group">
+                    <label>Prompt Rules (strict generation rules for the LLM)</label>
+                    <textarea name="prompt_rules" rows="6" class="input">{{ biz.get('prompt_rules', '') }}</textarea>
+                </div>
+                <div class="form-group">
+                    <label>Forbidden Terms (comma separated, never allowed in comments)</label>
+                    <input type="text" name="forbidden_terms" value="{{ biz.get('forbidden_terms', []) | join(', ') }}" class="input">
+                </div>
+                <div class="form-group">
+                    <label>Required Contact Line (always appended, leave empty for none)</label>
+                    <input type="text" name="required_suffix" value="{{ biz.get('required_suffix', '') }}" class="input">
+                </div>
+                <div class="form-group">
                     <label>Max Videos</label>
                     <input type="number" name="max_videos" value="{{ biz.max_videos }}" class="input">
                 </div>
                 <div class="form-group">
                     <label>Comments Per Account</label>
                     <input type="number" name="comments_per_account" value="{{ biz.comments_per_account }}" class="input">
+                </div>
+                <div class="form-group">
+                    <label>Daily Limit (total comments per day)</label>
+                    <input type="number" name="daily_limit" value="{{ biz.daily_limit }}" class="input">
                 </div>
                 <div class="form-group">
                     <label>Min Delay (seconds)</label>
@@ -114,11 +131,15 @@
     </div>
 
     <script>
-        function showTab(tabId) {
+        function showTab(tabId, el) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            event.target.classList.add('active');
-            document.getElementById(tabId).classList.add('active');
+            if (el) el.classList.add('active');
+            const content = document.getElementById(tabId);
+            if (content) content.classList.add('active');
+            if (tabId !== 'api') {
+                document.getElementById('activeBusinessKey').value = tabId;
+            }
         }
 
         function addAccount(bizKey) {
@@ -134,18 +155,34 @@
 
         document.getElementById('settingsForm').addEventListener('submit', function(e) {
             e.preventDefault();
-            const formData = new FormData(this);
 
-            fetch('/settings', {
-                method: 'POST',
-                body: formData
-            }).then(r => r.json()).then(d => {
-                if (d.success) {
-                    const msg = document.getElementById('successMsg');
-                    msg.style.display = 'block';
-                    setTimeout(() => msg.style.display = 'none', 3000);
+            // Only submit the visible business tab, otherwise all tabs overwrite each other.
+            const inactive = [];
+            document.querySelectorAll('.tab-content').forEach(c => {
+                if (!c.classList.contains('active')) {
+                    inactive.push(c);
+                    c.querySelectorAll('input, textarea, select').forEach(i => i.disabled = true);
                 }
             });
+
+            const formData = new FormData(this);
+
+            fetch('/settings', { method: 'POST', body: formData })
+                .then(r => r.json())
+                .then(d => {
+                    inactive.forEach(c => c.querySelectorAll('input, textarea, select').forEach(i => i.disabled = false));
+                    if (d.success) {
+                        const msg = document.getElementById('successMsg');
+                        msg.style.display = 'block';
+                        setTimeout(() => msg.style.display = 'none', 3000);
+                    } else if (d.error) {
+                        alert('Error: ' + d.error);
+                    }
+                })
+                .catch(err => {
+                    inactive.forEach(c => c.querySelectorAll('input, textarea, select').forEach(i => i.disabled = false));
+                    alert('Failed to save: ' + err);
+                });
         });
     </script>
 </body>

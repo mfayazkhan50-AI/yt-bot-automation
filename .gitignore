@@ -1,7 +1,18 @@
 .env
+ comm.env
 config.json
+config.example.json.bak
+bot_state.json
+bot_state.json.testbak
 client_secret.json
+venv/
+.venv/
 __pycache__/
 *.pyc
-comment_fail.png
 *.log
+*.png
+*.jpg
+comment_fail.png
+before_password.png
+after_email.png
+.pytest_cache/

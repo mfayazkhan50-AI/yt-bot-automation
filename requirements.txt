@@ -1,6 +1,8 @@
 undetected-chromedriver>=3.5.0
-selenium>=4.9.0
+selenium>=4.11.0
 google-api-python-client>=2.0.0
-groq>=0.4.0
 flask>=3.0.0
 python-dotenv>=1.0.0
+openai>=1.0.0
+playwright>=1.40.0
+gunicorn>=21.2.0

@@ -35,11 +35,11 @@
             </div>
             <div class="status-card">
                 <h3>Current Cycle</h3>
-                <span id="current-biz-index">Business {{ config.active_business or "1" }}</span>
+                <span id="current-biz-index">Business {{ (status.current_biz_index or 0) + 1 }} of {{ businesses | length }}</span>
             </div>
             <div class="status-card">
                 <h3>Today's Comments</h3>
-                <span id="today-comments">{{ status.today_comments }}/30</span>
+                <span id="today-comments">{{ status.today_comments }}/{{ businesses[active].daily_limit if active in businesses else 30 }}</span>
             </div>
             <div class="status-card">
                 <h3>Last Run</h3>
@@ -73,6 +73,13 @@
     </div>
 
     <script>
+        const BUSINESS_NAMES = {
+            {% for key, biz in businesses.items() %}
+            "{{ key }}": {{ biz.name | tojson }},
+            {% endfor %}
+        };
+        const BUSINESS_COUNT = {{ businesses | length }};
+
         function switchBusiness(key) {
             fetch('/api/switch_business', {
                 method: 'POST',
@@ -89,6 +96,16 @@
                     document.getElementById('status').className = data.running ? 'running' : 'stopped';
                     document.getElementById('today-comments').textContent = data.today_comments + '/' + data.daily_limit;
                     document.getElementById('last-run').textContent = data.last_run || 'Never';
+
+                    const bizName = document.getElementById('current-biz');
+                    if (data.business && BUSINESS_NAMES[data.business]) {
+                        bizName.textContent = BUSINESS_NAMES[data.business];
+                    }
+
+                    const cycle = document.getElementById('current-biz-index');
+                    if (typeof data.current_biz_index === 'number') {
+                        cycle.textContent = 'Business ' + (data.current_biz_index + 1) + ' of ' + BUSINESS_COUNT;
+                    }
 
                     const logsEl = document.getElementById('logs');
                     logsEl.innerHTML = '';

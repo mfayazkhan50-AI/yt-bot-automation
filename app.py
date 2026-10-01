@@ -3,6 +3,7 @@ import threading
 import time
 import os
 import random
+import shutil
 import logging
 import signal
 import sys
@@ -21,6 +22,7 @@ load_dotenv()
 app = Flask(__name__)
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+CONFIG_EXAMPLE_PATH = os.path.join(os.path.dirname(__file__), "config.example.json")
 LOG_FILE = os.path.join(os.path.dirname(__file__), "bot.log")
 STATE_FILE = os.path.join(os.path.dirname(__file__), "bot_state.json")
 # How long the bot loop may finish its current step before the process exits on SIGTERM.
@@ -119,11 +121,27 @@ def require_auth(f):
 
 def load_config():
     try:
-        with open(CONFIG_PATH, "r") as f:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
-        logger.error("config.json not found!")
-        return {"active_business": "business1", "businesses": {}}
+        # config.json is gitignored (it holds Google account passwords), so a
+        # fresh clone has none. Seed it from the committed template instead of
+        # idling forever with no businesses.
+        logger.warning("config.json not found - creating it from config.example.json")
+        try:
+            shutil.copyfile(CONFIG_EXAMPLE_PATH, CONFIG_PATH)
+            logger.warning(f"Created {CONFIG_PATH} from the template. Add your Google accounts at /settings")
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            logger.error(
+                "FATAL: neither config.json nor config.example.json exists. "
+                "Run: cp config.example.json config.json"
+            )
+            return {"active_business": "business1", "businesses": {}}
+        except (OSError, json.JSONDecodeError) as e:
+            logger.error(f"FATAL: could not create config.json from template: {e}")
+            return {"active_business": "business1", "businesses": {}}
     except json.JSONDecodeError as e:
         logger.error(f"config.json is corrupted: {e}")
         return {"active_business": "business1", "businesses": {}}

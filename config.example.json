@@ -1,0 +1,122 @@
+{
+  "youtube_api_key": "",
+  "active_business": "business1",
+  "businesses": {
+    "business1": {
+      "name": "New Airport Town",
+      "keywords": [
+        "Real Estate Islamabad",
+        "Real Estate Rawalpindi",
+        "TopCity",
+        "Faisal Town",
+        "Capital Smart City",
+        "Blue World City",
+        "Islamabad international Airport"
+      ],
+      "business_info": {
+        "Business Name": "New Airport Town",
+        "Business Type": "Real Estate / Housing Society",
+        "Website": "https://www.facebook.com/newairporttown/",
+        "Phone": "0312-9090995 / 0311-9559494",
+        "Location": "1 km from New Islamabad International Airport, Islamabad",
+        "Services": "Ready for construction plots, possession plots for sale, residential and commercial plots in Islamabad",
+        "Unique Selling Point": "Ready for construction and ready for possession plots located 1 km from New Islamabad International Airport"
+      },
+      "prompt_rules": "You are commenting on real estate videos about Islamabad, Rawalpindi, TopCity, Faisal Town, Capital Smart City, Blue World City and Islamabad International Airport. Write one natural, short comment (max 25 words) that replies to what the video is actually about. STRICT RULES: (1) NEVER mention the business name 'New Airport Town' and NEVER mention any housing society, block, sector or society name. (2) Instead, highlight these selling points naturally where they fit: ready for construction plots, possession plots for sale, plots located 1 km from New Islamabad International Airport. (3) ALWAYS end the comment with the contact numbers 0312-9090995 / 0311-9559494. (4) Never use fake personal stories. (5) Keep it conversational, not spammy.",
+      "forbidden_terms": [
+        "New Airport Town",
+        "newairporttown",
+        "TopCity",
+        "Faisal Town",
+        "Capital Smart City",
+        "Blue World City",
+        "Society",
+        "society name"
+      ],
+      "required_suffix": "0312-9090995 / 0311-9559494",
+      "min_comment_words": 8,
+      "max_comment_words": 25,
+      "max_videos": 30,
+      "comments_per_account": 15,
+      "daily_limit": 15,
+      "delay_min_seconds": 300,
+      "delay_max_seconds": 600,
+      "accounts": [],
+      "topic": "Islamabad and Rawalpindi real estate: housing societies, plots for sale, property investment, house prices and land in projects such as TopCity, Faisal Town, Capital Smart City, Blue World City and near Islamabad International Airport",
+      "relevance_check": true
+    },
+    "business2": {
+      "name": "The Dating Broker",
+      "keywords": [
+        "Tinder",
+        "Bumble",
+        "Hinge",
+        "Dating"
+      ],
+      "business_info": {
+        "Business Name": "The Dating Broker",
+        "Business Type": "Dating Service / Matchmaking",
+        "Website": "https://dating-broker.com/",
+        "Phone": "",
+        "Location": "",
+        "Services": "Dating advice, matchmaking support, profile optimization, online dating guidance",
+        "Unique Selling Point": "Practical, honest dating guidance instead of empty promises"
+      },
+      "prompt_rules": "You are commenting on videos about online dating, Tinder, Bumble, Hinge, dating apps and modern relationships. Write one natural, short comment (max 25 words) that adds genuine value: a dating tip, an honest app experience, or practical relationship advice that fits what the video is about. STRICT RULES: (1) Sound like a real person sharing a real opinion, never like an advertisement. (2) No emojis, no hashtags, no links, no phone numbers. (3) Never claim to be a professional or agency. (4) Never use fake personal stories.",
+      "forbidden_terms": [
+        "The Dating Broker",
+        "dating-broker"
+      ],
+      "required_suffix": "",
+      "min_comment_words": 8,
+      "max_comment_words": 25,
+      "max_videos": 30,
+      "comments_per_account": 15,
+      "daily_limit": 15,
+      "delay_min_seconds": 300,
+      "delay_max_seconds": 600,
+      "accounts": [],
+      "topic": "online dating and dating apps: Tinder, Bumble, Hinge, dating profiles, dating tips, relationships, marriage and dating advice for adults",
+      "relevance_check": true
+    },
+    "business3": {
+      "name": "AIRCS",
+      "keywords": [
+        "Immigration Consultant Rawalpindi",
+        "Immigration Consultant Islamabad",
+        "Immigration Consultant Faisalabad",
+        "Canada Immigration",
+        "Australia Immigration",
+        "Study Abroad Consultant Rawalpindi",
+        "Study Abroad Consultant Islamabad",
+        "Study Abroad Consultant Faisalabad"
+      ],
+      "business_info": {
+        "Business Name": "AIRCS",
+        "Business Type": "Immigration Consultant / Study Abroad Consultancy",
+        "Website": "https://aircs.pk/",
+        "Phone": "",
+        "Location": "Rawalpindi, Islamabad, Faisalabad",
+        "Services": "Study visa processing, Canada immigration, Australia immigration, study abroad consulting, immigration procedure guidance",
+        "Unique Selling Point": "Guidance for students and families from Rawalpindi, Islamabad and Faisalabad on study visas and immigration"
+      },
+      "prompt_rules": "You are commenting on videos about study visas, immigration procedures, Canada immigration, Australia immigration and study abroad consulting, especially questions from Rawalpindi, Islamabad and Faisalabad. Write one professional, informative comment (max 25 words) that gives useful, accurate general guidance relevant to the video. STRICT RULES: (1) Be professional and genuinely helpful, not salesy. (2) You may mention Canada, Australia, study visa or immigration process when it fits the topic. (3) Never promise visa approval or guaranteed results. (4) Never give legal or immigration advice as a fact without the general qualifier that requirements vary. (5) No emojis, no hashtags, no links, no phone numbers. (6) Never claim to be a government official.",
+      "forbidden_terms": [
+        "AIRCS",
+        "aircs.pk"
+      ],
+      "required_suffix": "",
+      "min_comment_words": 8,
+      "max_comment_words": 25,
+      "max_videos": 30,
+      "comments_per_account": 15,
+      "daily_limit": 15,
+      "delay_min_seconds": 300,
+      "delay_max_seconds": 600,
+      "accounts": [],
+      "topic": "study abroad and immigration: student visas, study permits, immigration to Canada and Australia, immigration consultants and study abroad consulting for Rawalpindi, Islamabad and Faisalabad",
+      "relevance_check": true
+    }
+  },
+  "_comment": "Template config. Copy to config.json (cp config.example.json config.json) and add your Google accounts under each business. This file is safe to commit; config.json is not."
+}

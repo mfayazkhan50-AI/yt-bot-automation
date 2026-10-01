@@ -20,7 +20,61 @@ cd "${PROJECT_DIR}"
 step() { echo; echo "=============================================================="; echo ">> $*"; echo "=============================================================="; }
 
 # ---------------------------------------------------------------------------
-step "1/8  Stop any previously running instance"
+step "1/9  Bootstrap config.json and .env from the committed templates"
+# config.json and .env are gitignored because they hold the client's Google
+# account passwords and API keys, so a fresh clone does not contain them.
+# The bot cannot do anything without them, so create them here from the safe
+# templates that ARE committed. Existing files are never overwritten.
+for tmpl in config.example.json .env.example; do
+  if [ ! -f "${PROJECT_DIR}/${tmpl}" ]; then
+    echo "ERROR: ${tmpl} is missing. Pull the latest code first:"
+    echo "         cd ${PROJECT_DIR} && git pull"
+    exit 1
+  fi
+done
+
+if [ ! -f "${PROJECT_DIR}/config.json" ]; then
+  cp "${PROJECT_DIR}/config.example.json" "${PROJECT_DIR}/config.json"
+  echo "Created config.json from config.example.json"
+else
+  echo "config.json already exists - left untouched"
+fi
+
+if [ ! -f "${PROJECT_DIR}/.env" ]; then
+  cp "${PROJECT_DIR}/.env.example" "${PROJECT_DIR}/.env"
+  chmod 600 "${PROJECT_DIR}/.env"
+  echo "Created .env from .env.example (permissions 600)"
+else
+  echo ".env already exists - left untouched"
+fi
+
+echo
+echo "Preflight check - required secrets:"
+MISSING=""
+for var in OPENROUTER_API_KEY YOUTUBE_API_KEY DASHBOARD_USER DASHBOARD_PASS; do
+  if [ -z "$(grep -E "^${var}=." "${PROJECT_DIR}/.env" 2>/dev/null)" ]; then
+    MISSING="${MISSING} ${var}"
+  else
+    echo "  ${var}: set"
+  fi
+done
+
+if [ -n "${MISSING}" ]; then
+  cat <<EOF
+
+WARNING: these variables are still empty in .env: ${MISSING}
+
+The service will start, but it CANNOT post comments until they are filled in:
+  nano ${PROJECT_DIR}/.env
+
+Gmail accounts are added in the dashboard, not in a file:
+  open http://<VPS_IP>:5000/settings and add accounts per business.
+EOF
+fi
+echo
+
+# ---------------------------------------------------------------------------
+step "2/9  Stop any previously running instance"
 if command -v systemctl >/dev/null 2>&1; then
   systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
   systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
@@ -34,20 +88,20 @@ echo "Remaining app.py processes:"
 pgrep -af "app.py" || echo "  none"
 
 # ---------------------------------------------------------------------------
-step "2/8  Activate virtualenv and install Python dependencies"
+step "3/9  Activate virtualenv and install Python dependencies"
 # shellcheck disable=SC1091
 source "${VENV_DIR}/bin/activate"
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
 # ---------------------------------------------------------------------------
-step "3/8  Install the Chromium binary (this VPS cannot use APT)"
+step "4/9  Install the Chromium binary (this VPS cannot use APT)"
 # Playwright downloads its own Chromium, bypassing the blocked Ubuntu mirrors.
 python -m pip install --upgrade playwright
 python -m playwright install chromium
 
 # ---------------------------------------------------------------------------
-step "4/8  Verify the browser binary is discoverable"
+step "5/9  Verify the browser binary is discoverable"
 python -c "
 import sys
 sys.path.insert(0, '${PROJECT_DIR}')
@@ -63,7 +117,7 @@ print('CHROMIUM_PATH=' + path)
 "
 
 # ---------------------------------------------------------------------------
-step "5/8  Headless driver self-test (start, load a page, quit)"
+step "6/9  Headless driver self-test (start, load a page, quit)"
 # Same code path the bot uses. Safe: it opens YouTube and closes again, it
 # never logs into Google and never posts a comment.
 python -c "
@@ -82,7 +136,7 @@ finally:
 "
 
 # ---------------------------------------------------------------------------
-step "6/8  Install and start the systemd service"
+step "7/9  Install and start the systemd service"
 install -m 644 "${PROJECT_DIR}/deploy/yt-bot.service" "/etc/systemd/system/${SERVICE_NAME}.service"
 systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}"
@@ -90,7 +144,7 @@ systemctl restart "${SERVICE_NAME}"
 sleep 8
 
 # ---------------------------------------------------------------------------
-step "7/8  Verify the service and show startup output"
+step "8/9  Verify the service and show startup output"
 echo "enabled : $(systemctl is-enabled ${SERVICE_NAME} 2>/dev/null || true)"
 echo "active  : $(systemctl is-active ${SERVICE_NAME} 2>/dev/null || true)"
 
@@ -107,7 +161,7 @@ echo "--- journal (live proof the service is logging) ---"
 journalctl -u "${SERVICE_NAME}" -n 25 --no-pager || true
 
 # ---------------------------------------------------------------------------
-step "8/8  Graceful restart test (proves systemd stop + auto-start work)"
+step "9/9  Graceful restart test (proves systemd stop + auto-start work)"
 PID_BEFORE="$(systemctl show "${SERVICE_NAME}" -p MainPID --value)"
 echo "PID before restart: ${PID_BEFORE}"
 systemctl restart "${SERVICE_NAME}"

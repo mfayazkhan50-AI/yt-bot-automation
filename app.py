@@ -3,6 +3,7 @@ import threading
 import time
 import os
 import random
+import secrets
 import shutil
 import logging
 import signal
@@ -13,18 +14,26 @@ from functools import wraps
 from flask import Flask, render_template, request, jsonify, Response
 from dotenv import load_dotenv
 
-from video_finder import find_videos
-from comment_generator import generate_comment, is_video_relevant
-from comment import process_comments
+# ---------------------------------------------------------------------------
+# Load .env exactly once, anchored to this file, BEFORE any project module.
+#   anchor   -> absolute path, immune to CWD and to a stray parent .env
+#   override -> .env wins over stale values inherited from systemd or a shell
+# Must stay above the local imports; those read os.environ lazily at call time.
+# ---------------------------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ENV_PATH = os.path.join(BASE_DIR, ".env")
+load_dotenv(ENV_PATH, override=True)
 
-load_dotenv()
+from video_finder import find_videos                                 # noqa: E402
+from comment_generator import generate_comment, is_video_relevant    # noqa: E402
+from comment import process_comments                                 # noqa: E402
 
 app = Flask(__name__)
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
-CONFIG_EXAMPLE_PATH = os.path.join(os.path.dirname(__file__), "config.example.json")
-LOG_FILE = os.path.join(os.path.dirname(__file__), "bot.log")
-STATE_FILE = os.path.join(os.path.dirname(__file__), "bot_state.json")
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+CONFIG_EXAMPLE_PATH = os.path.join(BASE_DIR, "config.example.json")
+LOG_FILE = os.path.join(BASE_DIR, "bot.log")
+STATE_FILE = os.path.join(BASE_DIR, "bot_state.json")
 # How long the bot loop may finish its current step before the process exits on SIGTERM.
 GRACEFUL_EXIT_SECONDS = 30
 
@@ -36,6 +45,28 @@ stream_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(mes
 
 logging.basicConfig(level=logging.INFO, handlers=[log_handler, stream_handler])
 logger = logging.getLogger("bot")
+
+
+def _validate_startup_env():
+    """Surface .env resolution problems at boot instead of at first request.
+
+    A missing or empty DASHBOARD_USER/DASHBOARD_PASS pair makes every request
+    return 401, which is indistinguishable from a wrong password. Log it once,
+    loudly, at startup. Values are never logged - only set/EMPTY.
+    """
+    keys = ("DASHBOARD_USER", "DASHBOARD_PASS", "OPENROUTER_API_KEY", "YOUTUBE_API_KEY", "LLM_MODEL")
+    if not os.path.isfile(ENV_PATH):
+        logger.warning(".env NOT found at %s - relying on the process environment only", ENV_PATH)
+    logger.info("Env loaded from %s | %s", ENV_PATH, " ".join(
+        f"{k}={'set' if os.environ.get(k, '').strip() else 'EMPTY'}" for k in keys))
+    missing = [k for k in ("DASHBOARD_USER", "DASHBOARD_PASS") if not os.environ.get(k, "").strip()]
+    if missing:
+        logger.error(
+            "FATAL: %s empty. Auth compares with no fallback, so every request would 401 "
+            "and nobody could log in. Populate %s", ", ".join(missing), ENV_PATH)
+
+
+_validate_startup_env()
 
 bot_status = {
     "running": False,
@@ -113,7 +144,13 @@ def require_auth(f):
         user = os.environ.get("DASHBOARD_USER", "")
         password = os.environ.get("DASHBOARD_PASS", "")
         auth = request.authorization
-        if not auth or auth.username != user or auth.password != password:
+        # An unset credential must never authenticate anyone: Flask cannot send
+        # an empty username, so comparing against "" would otherwise be an
+        # accidental pass/fail depending on client behaviour.
+        ok = (auth is not None and bool(user) and bool(password)
+              and secrets.compare_digest(auth.username or "", user)
+              and secrets.compare_digest(auth.password or "", password))
+        if not ok:
             return Response("Unauthorized", 401, {"WWW-Authenticate": 'Basic realm="Login Required"'})
         return f(*args, **kwargs)
     return decorated

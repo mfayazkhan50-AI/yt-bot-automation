@@ -15,4 +15,6 @@ __pycache__/
 comment_fail.png
 before_password.png
 after_email.png
+sessions/
+login_fail_*.png
 .pytest_cache/

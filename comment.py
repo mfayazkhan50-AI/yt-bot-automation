@@ -1,4 +1,6 @@
 import glob
+import getpass
+import hashlib
 import json
 import os
 import platform
@@ -16,6 +18,207 @@ from selenium.common.exceptions import NoSuchElementException, TimeoutException
 LOGIN_URL = "https://accounts.google.com/AddSession?continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26app%3Ddesktop%26hl%3Den-GB%26next%3D%252F&hl=en-GB&passive=false&service=youtube&uilel=0"
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+# ---------------------------------------------------------------------------
+# Session persistence / 2FA handling
+# ---------------------------------------------------------------------------
+
+# Cookies that only exist once Google considers the browser signed in.
+LOGIN_COOKIE_NAMES = {
+    "SID", "SSID", "APISID", "SAPISID",
+    "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PSIDTS", "__Secure-3PSIDTS",
+}
+
+# URL fragments Google uses for second-factor / abuse interstitials.
+CHALLENGE_URL_MARKERS = (
+    "accounts.google.com/signin/challenge",
+    "/challenge/",
+    "verifyoauthaction",
+    "accounts.google.com/badstartpage",
+)
+
+# Page copy that identifies a step-up challenge or bot check.
+CHALLENGE_TEXT_MARKERS = (
+    "2-step verification",
+    "two-step verification",
+    "verify it's you",
+    "verify it is you",
+    "security verification",
+    "verify your identity",
+    "confirm it's you",
+    "unusual traffic",
+    "enter the code",
+    "check your phone",
+    "recaptcha",
+    "i'm not a robot",
+    "captcha",
+)
+
+
+def session_dir():
+    """Where per-account browser profiles and cookie jars live."""
+    return os.environ.get("SESSION_DIR") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "sessions"
+    )
+
+
+def _session_key(email):
+    """Stable, filesystem-safe per-account key so accounts never share state."""
+    return hashlib.sha256(email.strip().lower().encode("utf-8")).hexdigest()[:16]
+
+
+def session_paths(email):
+    """(chrome user-data-dir, cookie jar) for one account."""
+    key = _session_key(email)
+    base = session_dir()
+    return os.path.join(base, f"{key}_profile"), os.path.join(base, f"{key}_cookies.json")
+
+
+def _ensure_session_dir():
+    try:
+        os.makedirs(session_dir(), exist_ok=True)
+        return True
+    except OSError as exc:
+        print(f"[SESSION] WARNING: cannot create {session_dir()}: {exc}")
+        return False
+
+
+def save_session(driver, email):
+    """Persist cookies so the next run can skip the password form."""
+    _, cookie_file = session_paths(email)
+    try:
+        with open(cookie_file, "w", encoding="utf-8") as handle:
+            json.dump(driver.get_cookies(), handle, indent=2)
+        print(f"[SESSION] Saved session cookies -> {cookie_file}")
+        return True
+    except Exception as exc:
+        print(f"[SESSION] WARNING: could not save cookies: {exc}")
+        return False
+
+
+def load_session(driver, email):
+    """Restore a previously saved cookie jar. Returns True if cookies were applied."""
+    _, cookie_file = session_paths(email)
+    if not os.path.isfile(cookie_file):
+        return False
+    try:
+        with open(cookie_file, "r", encoding="utf-8") as handle:
+            cookies = json.load(handle)
+    except Exception as exc:
+        print(f"[SESSION] WARNING: could not read {cookie_file}: {exc}")
+        return False
+
+    applied = 0
+    for cookie in cookies:
+        try:
+            driver.add_cookie(cookie)
+            applied += 1
+        except Exception:
+            # Stale or domain-scoped cookies are expected to be rejected.
+            pass
+    print(f"[SESSION] Restored {applied}/{len(cookies)} cookies for {email}")
+    return applied > 0
+
+
+def detect_security_challenge(driver):
+    """Return a short reason when Google demands a second factor, else None."""
+    try:
+        url = (driver.current_url or "").lower()
+    except Exception:
+        url = ""
+    for marker in CHALLENGE_URL_MARKERS:
+        if marker in url:
+            return f"challenge url ({marker})"
+
+    try:
+        page = (driver.page_source or "").lower()
+    except Exception:
+        page = ""
+    for marker in CHALLENGE_TEXT_MARKERS:
+        if marker in page:
+            return f"challenge text ('{marker}')"
+    return None
+
+
+def is_logged_in(driver):
+    """True when Google session cookies are present, else fall back to a UI probe."""
+    try:
+        names = {c.get("name") for c in driver.get_cookies()}
+    except Exception:
+        names = set()
+    if names & LOGIN_COOKIE_NAMES:
+        return True
+    try:
+        return bool(driver.find_elements(By.CSS_SELECTOR, "#avatar-btn"))
+    except Exception:
+        return False
+
+
+def _wait_for_password_or_challenge(driver, timeout):
+    """Poll for the password box, returning early if a challenge appears.
+
+    Returns (field, None) on success, (None, reason) for a challenge, and
+    (None, None) if the password field never showed up.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        challenge = detect_security_challenge(driver)
+        if challenge:
+            return None, challenge
+
+        for selector, by in (("Passwd", By.NAME), ("input[type='password']", By.CSS_SELECTOR)):
+            try:
+                for field in driver.find_elements(by, selector):
+                    if field.is_displayed() and field.is_enabled():
+                        return field, None
+            except Exception:
+                pass
+        time.sleep(0.5)
+    return None, None
+
+
+def _manual_2fa_seconds():
+    try:
+        return max(0, int(os.getenv("MANUAL_2FA_TIMEOUT", "300").strip()))
+    except (TypeError, ValueError):
+        return 300
+
+
+def _capture_failure(driver, tag):
+    """Absolute-path screenshot + URL so failures are diagnosable from the log."""
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), f"login_fail_{tag}_{stamp}.png"
+    )
+    try:
+        driver.save_screenshot(path)
+        print(f"[LOGIN] Screenshot saved: {path}")
+    except Exception:
+        pass
+    try:
+        print(f"[LOGIN] Stuck at URL: {driver.current_url}")
+    except Exception:
+        pass
+
+
+def wait_for_manual_completion(driver, timeout, email):
+    """Headful only: let a human finish 2FA in the visible browser window."""
+    deadline = time.time() + timeout
+    print(f"[LOGIN] >>> Complete the verification in the browser window.")
+    print(f"[LOGIN] >>> Waiting up to {int(timeout)}s for {email} ...")
+    while time.time() < deadline:
+        time.sleep(3)
+        try:
+            url = (driver.current_url or "").lower()
+        except Exception:
+            continue
+        if "youtube.com" in url or "myaccount.google.com" in url:
+            print("[LOGIN] Verification cleared (redirected out of the login flow).")
+            return True
+        if not detect_security_challenge(driver) and "accounts.google.com/signin" not in url:
+            print("[LOGIN] Verification cleared.")
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +440,7 @@ def _major_from_error(text):
     return int(match.group(1)) if match else None
 
 
-def _uc_kwargs(browser_path, major=None):
+def _uc_kwargs(browser_path, major=None, profile_dir=None):
     """undetected-chromedriver rejects a reused ChromeOptions object, so build fresh."""
     options, proxy = _build_options()
     kwargs = {"use_subprocess": True, "options": options}
@@ -245,10 +448,15 @@ def _uc_kwargs(browser_path, major=None):
         kwargs["browser_executable_path"] = browser_path
     if major:
         kwargs["version_main"] = major
+    if profile_dir:
+        # A persistent profile is the main defence against repeated 2FA: Google
+        # trusts a device it has already verified instead of challenging again.
+        os.makedirs(profile_dir, exist_ok=True)
+        kwargs["user_data_directory"] = profile_dir
     return kwargs, proxy
 
 
-def create_driver():
+def create_driver(profile_dir=None):
     """Start undetected-chromedriver with an explicit browser binary when available."""
     browser_path = resolve_browser_path()
 
@@ -262,7 +470,7 @@ def create_driver():
         )
 
     major = detect_browser_major(browser_path)
-    kwargs, proxy = _uc_kwargs(browser_path, major)
+    kwargs, proxy = _uc_kwargs(browser_path, major, profile_dir)
 
     try:
         driver = uc.Chrome(**kwargs)
@@ -272,18 +480,18 @@ def create_driver():
 
         if reported_major and reported_major != major:
             print(f"[BROWSER] Retrying undetected-chromedriver pinned to major {reported_major}")
-            retry_kwargs, proxy = _uc_kwargs(browser_path, reported_major)
+            retry_kwargs, proxy = _uc_kwargs(browser_path, reported_major, profile_dir)
             try:
                 driver = uc.Chrome(**retry_kwargs)
             except Exception as retry_exc:
                 print(f"[BROWSER] undetected-chromedriver retry failed: {str(retry_exc).splitlines()[0][:160]}")
                 print("[BROWSER] Falling back to Selenium + Selenium Manager...")
                 options, proxy = _build_options()
-                driver = _create_with_selenium(options, browser_path)
+                driver = _create_with_selenium(options, browser_path, profile_dir)
         else:
             print("[BROWSER] Falling back to Selenium + Selenium Manager...")
             options, proxy = _build_options()
-            driver = _create_with_selenium(options, browser_path)
+            driver = _create_with_selenium(options, browser_path, profile_dir)
 
     try:
         driver.execute_cdp_cmd(
@@ -298,12 +506,15 @@ def create_driver():
     return driver
 
 
-def _create_with_selenium(options, browser_path):
+def _create_with_selenium(options, browser_path, profile_dir=None):
     from selenium import webdriver
 
     chrome_options = webdriver.ChromeOptions()
     for argument in getattr(options, "arguments", []) or []:
         chrome_options.add_argument(argument)
+    if profile_dir:
+        os.makedirs(profile_dir, exist_ok=True)
+        chrome_options.add_argument(f"--user-data-dir={profile_dir}")
     if browser_path:
         chrome_options.binary_location = browser_path
     return webdriver.Chrome(options=chrome_options)
@@ -354,51 +565,126 @@ def dismiss_google_prompts(driver):
             break
 
 
+def _handle_challenge(driver, email, manual_timeout):
+    """Deal with a 2FA / security check the bot cannot answer on its own.
+
+    Never raises. Returns True only when the account ends up usable.
+    """
+    print("[LOGIN] SECURITY CHALLENGE - Google requires an extra verification step.")
+    _capture_failure(driver, "security_challenge")
+
+    if _is_headless():
+        print("[LOGIN] Headless mode: nobody can answer the prompt, so waiting cannot help.")
+        print("[LOGIN] Verify this account once from a machine with a display, then copy")
+        print("[LOGIN] the sessions/ folder to the VPS so the headless bot reuses it:")
+        print("[LOGIN]   cd <project> && python -c \"import comment; comment.manual_login()\"")
+        print("[LOGIN] If the challenge repeats every run, point the bot at a residential proxy.")
+        return False
+
+    if manual_timeout > 0 and wait_for_manual_completion(driver, manual_timeout, email):
+        if is_logged_in(driver):
+            save_session(driver, email)
+            print(f"[LOGIN] SUCCESS - challenge completed manually for {email}")
+            return True
+        print("[LOGIN] Verification appeared to clear but no session cookie was issued.")
+        return False
+
+    print(f"[LOGIN] Manual completion not completed within {manual_timeout}s.")
+    return False
+
+
 def login(driver, email, password):
-    wait = WebDriverWait(driver, 15)
+    """Sign in, handling 2FA challenges gracefully.
+
+    Returns True only when a real Google session exists. Never raises
+    TimeoutException to the caller.
+    """
     driver.set_page_load_timeout(60)
+    wait = WebDriverWait(driver, 15)
+    manual_timeout = _manual_2fa_seconds()
+
+    print("[LOGIN] Restoring saved session (if any)...")
+    load_session(driver, email)
 
     print("[LOGIN] Navigating to Google login...")
     driver.get(LOGIN_URL)
     time.sleep(4)
 
+    # A restored profile/cookie jar can bypass the whole login form.
+    if is_logged_in(driver):
+        save_session(driver, email)
+        print(f"[LOGIN] SUCCESS - restored existing session for {email}")
+        return True
+
     print(f"[LOGIN] Entering email: {email}")
-    email_field = wait.until(EC.visibility_of_element_located((By.NAME, "identifier")))
-    email_field.clear()
-    email_field.send_keys(email)
+    try:
+        email_field = wait.until(EC.visibility_of_element_located((By.NAME, "identifier")))
+    except TimeoutException:
+        challenge = detect_security_challenge(driver)
+        if challenge:
+            print(f"[LOGIN] {challenge} appeared at the first step.")
+            return _handle_challenge(driver, email, manual_timeout)
+        print("[LOGIN] ERROR - email field never appeared and no challenge was detected.")
+        _capture_failure(driver, "no_email_field")
+        return False
+
+    try:
+        email_field.clear()
+        email_field.send_keys(email)
+    except Exception as exc:
+        print(f"[LOGIN] ERROR - could not type the email: {exc}")
+        _capture_failure(driver, "email_entry")
+        return False
     time.sleep(1)
 
     print("[LOGIN] Clicking Next...")
-    wait.until(EC.element_to_be_clickable((By.ID, "identifierNext"))).click()
+    try:
+        wait.until(EC.element_to_be_clickable((By.ID, "identifierNext"))).click()
+    except TimeoutException:
+        print("[LOGIN] ERROR - 'Next' was not clickable after the email step.")
+        _capture_failure(driver, "identifier_next")
+        return False
     time.sleep(4)
 
+    # This is where 2FA used to blow up with an uncaught TimeoutException.
+    print("[LOGIN] Waiting for the password field (watching for a 2FA challenge)...")
+    pass_field, challenge = _wait_for_password_or_challenge(driver, timeout=20)
+    if challenge:
+        print(f"[LOGIN] {challenge} appeared before the password prompt.")
+        return _handle_challenge(driver, email, manual_timeout)
+    if pass_field is None:
+        print("[LOGIN] ERROR - timed out waiting for the password field.")
+        _capture_failure(driver, "no_password_field")
+        return False
+
     print("[LOGIN] Entering password...")
-    driver.save_screenshot("before_password.png")
-    pass_field = wait.until(EC.visibility_of_element_located((By.NAME, "Passwd")))
-    pass_field.clear()
-    pass_field.send_keys(password)
+    try:
+        pass_field.clear()
+        pass_field.send_keys(password)
+    except Exception as exc:
+        print(f"[LOGIN] ERROR - could not type the password: {exc}")
+        _capture_failure(driver, "password_entry")
+        return False
     time.sleep(1)
 
     print("[LOGIN] Clicking Next...")
-    wait.until(EC.element_to_be_clickable((By.ID, "passwordNext"))).click()
+    try:
+        WebDriverWait(driver, 15).until(EC.element_to_be_clickable((By.ID, "passwordNext"))).click()
+    except TimeoutException:
+        print("[LOGIN] ERROR - password 'Next' was not clickable.")
+        _capture_failure(driver, "password_next")
+        return False
     time.sleep(5)
 
     dismiss_google_prompts(driver)
 
-    current_url = driver.current_url
-    print(f"[LOGIN] Current URL: {current_url}")
+    # Challenge can also be raised *after* a correct password.
+    challenge = detect_security_challenge(driver)
+    if challenge:
+        print(f"[LOGIN] {challenge} raised after the password was accepted.")
+        return _handle_challenge(driver, email, manual_timeout)
 
-    if "youtube.com" in current_url or "myaccount.google.com" in current_url:
-        print(f"[LOGIN] SUCCESS - Logged in as {email}")
-    elif "challenge" in current_url.lower():
-        print("[LOGIN] SECURITY CHALLENGE - manual intervention needed")
-        print("[LOGIN] Waiting 120s to see if it clears on its own...")
-        time.sleep(120)
-        dismiss_google_prompts(driver)
-    else:
-        print(f"[LOGIN] WARNING - may not be logged in. URL: {current_url}")
-
-    print("[LOGIN] Visiting YouTube to establish session...")
+    print("[LOGIN] Visiting YouTube to establish the session...")
     try:
         driver.get("https://www.youtube.com")
         time.sleep(5)
@@ -407,7 +693,48 @@ def login(driver, email, password):
     except Exception as exc:
         print(f"[LOGIN] YouTube visit failed: {exc}")
 
+    if not is_logged_in(driver):
+        print("[LOGIN] WARNING - login flow finished but no session cookie was issued.")
+        _capture_failure(driver, "not_signed_in")
+        return False
+
+    save_session(driver, email)
+    print(f"[LOGIN] SUCCESS - logged in as {email}")
     return True
+
+
+def manual_login():
+    """Interactive helper: sign in once in a real browser, then save the session.
+
+    Run this on a machine with a display (or a VNC/X session) using
+        python -c "import comment; comment.manual_login()"
+    Afterwards copy the sessions/ folder to the VPS; the headless bot reuses it
+    and should stop being challenged.
+    """
+    if _is_headless() and os.getenv("HEADLESS_MODE", "1").strip() == "1":
+        print("[MANUAL] HEADLESS_MODE is 1 - set HEADLESS_MODE=0 so a window appears.")
+    if not _ensure_session_dir():
+        return False
+
+    email = input("Google email: ").strip()
+    password = getpass.getpass("Google password: ")
+    profile_dir, _ = session_paths(email)
+    print(f"[MANUAL] Session directory: {profile_dir}")
+
+    driver = create_driver(profile_dir=profile_dir)
+    try:
+        ok = login(driver, email, password)
+        if ok:
+            print(f"[MANUAL] Session saved to {session_paths(email)[1]}")
+            print("[MANUAL] Copy the whole sessions/ folder to the VPS.")
+        else:
+            print("[MANUAL] Login did not complete - session NOT saved.")
+        return ok
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -485,10 +812,20 @@ def process_comments(email, password, video_comments, delay_min_seconds=10, dela
         return results
 
     try:
-        driver = create_driver()
+        _ensure_session_dir()
+        profile_dir, _ = session_paths(email)
+        driver = create_driver(profile_dir=profile_dir)
         driver.set_page_load_timeout(60)
         driver.set_script_timeout(30)
-        login(driver, email, password)
+
+        if not login(driver, email, password):
+            # Previously login() returned True even when it failed, so the bot
+            # tried to post comments while signed out.
+            print("[COMMENTER] Login did not complete - skipping this account.")
+            print("[COMMENTER] Check bot.log for the [LOGIN] reason and screenshot above it.")
+            results["failed"] += len(video_comments)
+            return results
+
         time.sleep(3)
 
         for index, item in enumerate(video_comments):

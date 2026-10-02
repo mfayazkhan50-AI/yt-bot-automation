@@ -113,8 +113,50 @@ def save_session(driver, email):
         return False
 
 
+def _sanitize_cookie(cookie):
+    """Return a cookie dict Chrome will accept, or None if it is unusable.
+
+    driver.get_cookies() emits fields that add_cookie() then rejects - most
+    notably sameSite values ("no_restriction" / "unspecified") - and a single
+    rejected cookie is silently skipped. Rebuild only the fields Chrome needs
+    so one bad cookie cannot abort the whole jar.
+    """
+    if not isinstance(cookie, dict):
+        return None
+    name = cookie.get("name")
+    value = cookie.get("value")
+    if not name or value is None:
+        return None
+
+    cleaned = {
+        "name": name,
+        "value": value,
+        "path": cookie.get("path") or "/",
+    }
+    if cookie.get("domain"):
+        cleaned["domain"] = cookie["domain"]
+    if cookie.get("secure") is not None:
+        cleaned["secure"] = bool(cookie["secure"])
+    if cookie.get("httpOnly") is not None:
+        cleaned["httpOnly"] = bool(cookie["httpOnly"])
+    expiry = cookie.get("expiry")
+    if expiry is not None:
+        try:
+            cleaned["expiry"] = int(float(expiry))
+        except (TypeError, ValueError):
+            pass
+    # sameSite is deliberately dropped - see the docstring above.
+    return cleaned
+
+
 def load_session(driver, email):
-    """Restore a previously saved cookie jar. Returns True if cookies were applied."""
+    """Inject a saved cookie jar into the CURRENT browser context.
+
+    The driver must already be sitting on the cookie's domain (youtube.com):
+    Selenium rejects add_cookie() when the page domain does not match, which is
+    why restoring while on accounts.google.com reported "Restored 0/22".
+    Returns True if at least one cookie was applied.
+    """
     _, cookie_file = session_paths(email)
     if not os.path.isfile(cookie_file):
         return False
@@ -127,11 +169,15 @@ def load_session(driver, email):
 
     applied = 0
     for cookie in cookies:
+        cleaned = _sanitize_cookie(cookie)
+        if not cleaned:
+            continue
         try:
-            driver.add_cookie(cookie)
+            driver.add_cookie(cleaned)
             applied += 1
         except Exception:
-            # Stale or domain-scoped cookies are expected to be rejected.
+            # Cookies for a different domain (e.g. .google.com while the page
+            # is youtube.com) are expected to be rejected here.
             pass
     print(f"[SESSION] Restored {applied}/{len(cookies)} cookies for {email}")
     return applied > 0
@@ -201,13 +247,20 @@ def wait_for_session_cookies(driver, timeout):
 
 
 def is_logged_in(driver):
-    """True when Google session cookies are present, else fall back to a UI probe."""
+    """True when a Google session cookie exists, else probe the YouTube UI.
+
+    Cookies alone are not enough right after injecting a jar (the page may
+    still be rendering), and the UI alone is not enough either. Check both.
+    """
     if has_session_cookies(driver):
         return True
-    try:
-        return bool(driver.find_elements(By.CSS_SELECTOR, "#avatar-btn"))
-    except Exception:
-        return False
+    for selector in ("#avatar-btn", "a#avatar-link", "button[aria-label='Account menu']"):
+        try:
+            if driver.find_elements(By.CSS_SELECTOR, selector):
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def _wait_for_password_or_challenge(driver, timeout):
@@ -746,8 +799,57 @@ def _handle_challenge(driver, email, manual_timeout):
     return False
 
 
+def restore_session(driver, email):
+    """Reuse a saved YouTube session without ever showing the login form.
+
+    Visits youtube.com first so the cookie domain context is valid, checks
+    whether the persistent Chrome profile is already signed in, injects the
+    saved jar if not, then reloads and re-checks. Returns True when the browser
+    ends up signed in, and the caller must then NOT navigate to
+    accounts.google.com - a fresh visit to that login form is what Google
+    blocks with /signin/rejected on the VPS.
+    """
+    _, cookie_file = session_paths(email)
+    has_jar = os.path.isfile(cookie_file)
+
+    print("[LOGIN] Checking for an existing YouTube session...")
+    try:
+        driver.get("https://www.youtube.com")
+        time.sleep(3)
+    except Exception as exc:
+        print(f"[LOGIN] Could not reach youtube.com: {exc}")
+        return False
+
+    # The persistent Chrome profile may already be signed in.
+    if is_logged_in(driver):
+        print("[LOGIN] Browser profile is already signed in.")
+        return True
+
+    if not has_jar:
+        print("[LOGIN] No saved cookie jar for this account.")
+        return False
+
+    if not load_session(driver, email):
+        print("[LOGIN] No cookies could be restored from the saved jar.")
+        return False
+
+    # Reload so the freshly injected cookies are actually sent with the request.
+    try:
+        driver.refresh()
+        time.sleep(4)
+    except Exception:
+        pass
+
+    if is_logged_in(driver):
+        print("[LOGIN] Session restored from saved cookies.")
+        return True
+
+    print("[LOGIN] Saved cookies did not establish a session.")
+    return False
+
+
 def login(driver, email, password):
-    """Sign in, handling 2FA challenges gracefully.
+    """Sign in, preferring a restored session and handling 2FA gracefully.
 
     Returns True only when a real Google session exists. Never raises
     TimeoutException to the caller.
@@ -756,24 +858,18 @@ def login(driver, email, password):
     wait = WebDriverWait(driver, 15)
     manual_timeout = _manual_2fa_seconds()
 
-    print("[LOGIN] Navigating to Google login...")
-    driver.get(LOGIN_URL)
-    time.sleep(4)
-
-    # Restore the saved cookie jar only after navigating onto the matching
-    # domain: Selenium rejects add_cookie() when the current page's domain does
-    # not match, so loading the jar while sitting on about:blank silently
-    # dropped every cookie. The persistent Chrome profile normally carries the
-    # session already; this also covers a sessions/<key>_cookies.json copied in
-    # on its own.
-    print("[LOGIN] Restoring saved session (if any)...")
-    load_session(driver, email)
-
-    # A restored profile/cookie jar can bypass the whole login form.
-    if is_logged_in(driver):
+    # 1. Reuse the saved session first. This navigates to youtube.com (a valid
+    #    cookie domain) and never touches accounts.google.com, so a working
+    #    session bypasses the login form completely.
+    if restore_session(driver, email):
         save_session(driver, email)
         print(f"[LOGIN] SUCCESS - restored existing session for {email}")
         return True
+
+    # 2. No usable session, so fall back to a full form login.
+    print("[LOGIN] No usable session - starting fresh login...")
+    driver.get(LOGIN_URL)
+    time.sleep(4)
 
     print(f"[LOGIN] Entering email: {email}")
     try:

@@ -35,6 +35,7 @@ CHALLENGE_URL_MARKERS = (
     "/challenge/",
     "verifyoauthaction",
     "accounts.google.com/badstartpage",
+    "/signin/rejected",
 )
 
 # Page copy that identifies a step-up challenge or bot check.
@@ -52,6 +53,18 @@ CHALLENGE_TEXT_MARKERS = (
     "recaptcha",
     "i'm not a robot",
     "captcha",
+)
+
+# Rejected sign-ins. These are credential errors, not 2FA, and must not be
+# reported as a challenge or the operator will chase a verification that will
+# never succeed.
+BAD_CREDENTIAL_URL_MARKERS = ("/signin/rejected",)
+BAD_CREDENTIAL_TEXT_MARKERS = (
+    "couldn't find your google account",
+    "could not find your google account",
+    "wrong password",
+    "incorrect password",
+    "unusual traffic from your computer network",
 )
 
 
@@ -137,6 +150,26 @@ def detect_security_challenge(driver):
     for marker in CHALLENGE_TEXT_MARKERS:
         if marker in page:
             return f"challenge text ('{marker}')"
+    return None
+
+
+def detect_bad_credentials(driver):
+    """Return a reason when Google rejected the account/password outright."""
+    try:
+        url = (driver.current_url or "").lower()
+    except Exception:
+        url = ""
+    for marker in BAD_CREDENTIAL_URL_MARKERS:
+        if marker in url:
+            return f"sign-in rejected by Google ({marker})"
+
+    try:
+        page = (driver.page_source or "").lower()
+    except Exception:
+        page = ""
+    for marker in BAD_CREDENTIAL_TEXT_MARKERS:
+        if marker in page:
+            return f"sign-in rejected by Google ('{marker}')"
     return None
 
 
@@ -577,7 +610,7 @@ def _handle_challenge(driver, email, manual_timeout):
         print("[LOGIN] Headless mode: nobody can answer the prompt, so waiting cannot help.")
         print("[LOGIN] Verify this account once from a machine with a display, then copy")
         print("[LOGIN] the sessions/ folder to the VPS so the headless bot reuses it:")
-        print("[LOGIN]   cd <project> && python -c \"import comment; comment.manual_login()\"")
+        print("[LOGIN]   python save_session.py --headful")
         print("[LOGIN] If the challenge repeats every run, point the bot at a residential proxy.")
         return False
 
@@ -650,6 +683,12 @@ def login(driver, email, password):
     print("[LOGIN] Waiting for the password field (watching for a 2FA challenge)...")
     pass_field, challenge = _wait_for_password_or_challenge(driver, timeout=20)
     if challenge:
+        rejected = detect_bad_credentials(driver)
+        if rejected:
+            print(f"[LOGIN] {rejected}")
+            print("[LOGIN] This is a credential problem, not a verification prompt.")
+            _capture_failure(driver, "bad_credentials")
+            return False
         print(f"[LOGIN] {challenge} appeared before the password prompt.")
         return _handle_challenge(driver, email, manual_timeout)
     if pass_field is None:
@@ -681,6 +720,12 @@ def login(driver, email, password):
     # Challenge can also be raised *after* a correct password.
     challenge = detect_security_challenge(driver)
     if challenge:
+        rejected = detect_bad_credentials(driver)
+        if rejected:
+            print(f"[LOGIN] {rejected}")
+            print("[LOGIN] Check the email and password in config.json / Settings.")
+            _capture_failure(driver, "bad_credentials")
+            return False
         print(f"[LOGIN] {challenge} raised after the password was accepted.")
         return _handle_challenge(driver, email, manual_timeout)
 

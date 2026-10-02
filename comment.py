@@ -6,6 +6,7 @@ import os
 import platform
 import random
 import re
+import shutil
 import subprocess
 import time
 
@@ -28,6 +29,10 @@ LOGIN_COOKIE_NAMES = {
     "SID", "SSID", "APISID", "SAPISID",
     "__Secure-1PSID", "__Secure-3PSID", "__Secure-1PSIDTS", "__Secure-3PSIDTS",
 }
+
+# The two cookies that actually represent a Google session. manual_login()
+# will not declare success until at least one of these is stored.
+PRIMARY_SESSION_COOKIES = ("SID", "SSID", "__Secure-1PSID", "__Secure-3PSID")
 
 # URL fragments Google uses for second-factor / abuse interstitials.
 CHALLENGE_URL_MARKERS = (
@@ -173,13 +178,32 @@ def detect_bad_credentials(driver):
     return None
 
 
+def session_cookie_names(driver):
+    try:
+        return {c.get("name") for c in driver.get_cookies()}
+    except Exception:
+        return set()
+
+
+def has_session_cookies(driver):
+    """True only when a real Google SID/SSID-family cookie is present."""
+    return bool(session_cookie_names(driver) & set(PRIMARY_SESSION_COOKIES))
+
+
+def wait_for_session_cookies(driver, timeout):
+    """Poll until a real SID/SSID cookie is stored; returns the names found."""
+    deadline = time.time() + max(0, timeout)
+    while time.time() < deadline:
+        names = session_cookie_names(driver) & set(PRIMARY_SESSION_COOKIES)
+        if names:
+            return sorted(names)
+        time.sleep(2)
+    return []
+
+
 def is_logged_in(driver):
     """True when Google session cookies are present, else fall back to a UI probe."""
-    try:
-        names = {c.get("name") for c in driver.get_cookies()}
-    except Exception:
-        names = set()
-    if names & LOGIN_COOKIE_NAMES:
+    if has_session_cookies(driver):
         return True
     try:
         return bool(driver.find_elements(By.CSS_SELECTOR, "#avatar-btn"))
@@ -255,7 +279,11 @@ def wait_for_manual_completion(driver, timeout, email):
 
 
 # ---------------------------------------------------------------------------
-# Browser binary resolution (works on VPS Linux without APT-installed Chrome)
+# Browser binary resolution
+#
+# Google fingerprints Playwright's Chromium build and answers it with a
+# reCAPTCHA on essentially every sign-in, so a genuine Chrome/Chromium install
+# is resolved first and the Playwright download is opt-in only.
 # ---------------------------------------------------------------------------
 
 def _first_existing(paths):
@@ -263,6 +291,34 @@ def _first_existing(paths):
         if path and os.path.isfile(path):
             return path
     return None
+
+
+def _playwright_allowed():
+    """Playwright Chromium is only ever used when explicitly opted into."""
+    return os.getenv("ALLOW_PLAYWRIGHT_CHROMIUM", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _is_playwright_binary(path):
+    normalised = os.path.normpath(path or "").lower()
+    return "ms-playwright" in normalised or "playwright" in normalised
+
+
+def _install_help():
+    if platform.system() == "Windows":
+        return [
+            "[BROWSER] Install Google Chrome, then re-run:",
+            "[BROWSER]   winget install --id Google.Chrome -e",
+            "[BROWSER] or download https://www.google.com/chrome/",
+        ]
+    return [
+        "[BROWSER] Install real Chrome (Ubuntu/Debian):",
+        "[BROWSER]   curl -fsSL -o /tmp/chrome.deb \\",
+        "[BROWSER]     https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb",
+        "[BROWSER]   sudo dpkg -i /tmp/chrome.deb && sudo apt-get -f install -y",
+        "[BROWSER] That comes from dl.google.com and does not need the APT mirrors.",
+    ]
 
 
 def _playwright_candidates():
@@ -307,47 +363,92 @@ def _version_key(path):
 
 
 def _system_candidates():
-    if platform.system() == "Windows":
+    """Genuine Chrome/Chromium installs, most likely first."""
+    system = platform.system()
+
+    if system == "Windows":
+        local = os.getenv("LOCALAPPDATA", "")
+        program_files = os.getenv("ProgramFiles", r"C:\Program Files")
+        program_files_x86 = os.getenv("ProgramFiles(x86)", r"C:\Program Files (x86)")
         return [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
+            os.path.join(program_files, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(program_files_x86, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(local, "Google", "Chrome", "Application", "chrome.exe") if local else "",
+            os.path.join(program_files, "Google", "Chrome Beta", "Application", "chrome.exe"),
+            os.path.join(program_files_x86, "Google", "Chrome Beta", "Application", "chrome.exe"),
+            os.path.join(program_files, "Chromium", "Application", "chrome.exe"),
+            os.path.join(program_files_x86, "Chromium", "Application", "chrome.exe"),
         ]
-    if platform.system() == "Darwin":
+
+    if system == "Darwin":
         return [
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
         ]
+
     return [
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
+        "/opt/google/chrome/chrome",
+        "/opt/google/chrome-beta/chrome",
         "/usr/bin/chromium",
         "/usr/bin/chromium-browser",
         "/snap/bin/chromium",
+        "/usr/local/bin/chrome",
     ]
 
 
+def _on_path_candidates():
+    """Genuine chrome/chromium found via PATH (excludes Playwright builds)."""
+    found = []
+    for name in ("google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser"):
+        hit = shutil.which(name)
+        if hit and not _is_playwright_binary(hit):
+            found.append(hit)
+    return found
+
+
 def resolve_browser_path():
-    """Return a usable Chrome/Chromium binary path, or None to let uc decide."""
+    """Return a genuine Chrome/Chromium path, or None with install guidance.
+
+    A genuine Chrome install is strongly preferred: Google serves a reCAPTCHA
+    to Playwright's Chromium build on essentially every login attempt.
+    """
     explicit = os.getenv("CHROMIUM_PATH") or os.getenv("BROWSER_PATH")
     if explicit:
-        if os.path.isfile(explicit):
+        if not os.path.isfile(explicit):
+            print(f"[BROWSER] WARNING: CHROMIUM_PATH does not exist: {explicit}")
+        elif _is_playwright_binary(explicit) and not _playwright_allowed():
+            print(f"[BROWSER] REFUSING Playwright Chromium set in CHROMIUM_PATH: {explicit}")
+            print("[BROWSER] Google flags that build with reCAPTCHA on every login.")
+            print("[BROWSER] Set ALLOW_PLAYWRIGHT_CHROMIUM=1 only if you accept that.")
+        else:
             print(f"[BROWSER] Using CHROMIUM_PATH from env: {explicit}")
             return explicit
-        print(f"[BROWSER] WARNING: CHROMIUM_PATH does not exist: {explicit}")
-
-    playwright_path = _first_existing(_playwright_candidates())
-    if playwright_path:
-        print(f"[BROWSER] Using Playwright Chromium: {playwright_path}")
-        return playwright_path
 
     system_path = _first_existing(_system_candidates())
     if system_path:
-        print(f"[BROWSER] Using system browser: {system_path}")
+        print(f"[BROWSER] Using system Chrome: {system_path}")
         return system_path
 
-    print("[BROWSER] WARNING: No Chrome/Chromium binary found.")
-    print("[BROWSER] On the VPS run: python -m playwright install chromium")
+    path_browser = _first_existing(_on_path_candidates())
+    if path_browser:
+        print(f"[BROWSER] Using Chrome found on PATH: {path_browser}")
+        return path_browser
+
+    if _playwright_allowed():
+        playwright_path = _first_existing(_playwright_candidates())
+        if playwright_path:
+            print(f"[BROWSER] WARNING: falling back to Playwright Chromium: {playwright_path}")
+            print("[BROWSER] Expect reCAPTCHA challenges until real Chrome is installed.")
+            return playwright_path
+    else:
+        print("[BROWSER] Skipping Playwright Chromium - Google flags it during login.")
+
+    print("[BROWSER] ERROR: no genuine Chrome/Chromium install was found.")
+    for line in _install_help():
+        print(line)
     return None
 
 
@@ -473,6 +574,22 @@ def _major_from_error(text):
     return int(match.group(1)) if match else None
 
 
+def _apply_debug_port(options):
+    """Expose Chrome DevTools Protocol on localhost for live inspection.
+
+    Chrome >= 136 refuses --remote-debugging-port unless a non-default
+    --user-data-dir is also passed, so callers only use this with a profile.
+    """
+    port = (os.getenv("CHROME_DEBUG_PORT", "") or "").strip()
+    if not port:
+        return
+    if not port.isdigit():
+        print(f"[BROWSER] WARNING: CHROME_DEBUG_PORT must be numeric, got {port!r}")
+        return
+    options.add_argument(f"--remote-debugging-port={port}")
+    print(f"[BROWSER] Remote debugging enabled on 127.0.0.1:{port} (CDP)")
+
+
 def _uc_kwargs(browser_path, major=None, profile_dir=None):
     """undetected-chromedriver rejects a reused ChromeOptions object, so build fresh."""
     options, proxy = _build_options()
@@ -486,6 +603,7 @@ def _uc_kwargs(browser_path, major=None, profile_dir=None):
         # trusts a device it has already verified instead of challenging again.
         os.makedirs(profile_dir, exist_ok=True)
         kwargs["user_data_directory"] = profile_dir
+        _apply_debug_port(options)
     return kwargs, proxy
 
 
@@ -495,11 +613,11 @@ def create_driver(profile_dir=None):
 
     if not browser_path:
         raise RuntimeError(
-            "No Chrome/Chromium binary found (this VPS cannot install Chrome via APT).\n"
-            "Fix it with:\n"
-            "  python -m pip install playwright\n"
-            "  python -m playwright install chromium\n"
-            "or point CHROMIUM_PATH in .env at an existing chrome/chromium binary."
+            "No genuine Chrome/Chromium binary found.\n"
+            "Playwright's Chromium is not used for login because Google flags it\n"
+            "with reCAPTCHA, so install real Chrome and retry:\n"
+            + "\n".join(_install_help())
+            + "\nor point CHROMIUM_PATH in .env at an existing real Chrome binary."
         )
 
     major = detect_browser_major(browser_path)
@@ -548,9 +666,66 @@ def _create_with_selenium(options, browser_path, profile_dir=None):
     if profile_dir:
         os.makedirs(profile_dir, exist_ok=True)
         chrome_options.add_argument(f"--user-data-dir={profile_dir}")
+        _apply_debug_port(chrome_options)
     if browser_path:
         chrome_options.binary_location = browser_path
     return webdriver.Chrome(options=chrome_options)
+
+
+def safe_quit(driver):
+    """Close a driver without letting Windows teardown errors escape.
+
+    By the time quit() runs, uc's service pipe is often already gone, which
+    raises OSError [WinError 6] 'The handle is invalid'; uc then raises the
+    same error again from __del__ during garbage collection. Neither means
+    the login or comment failed, so both are suppressed.
+    """
+    if driver is None:
+        return
+    try:
+        driver.quit()
+    except OSError as exc:
+        print(f"[BROWSER] Teardown OSError ignored (WinError 6 is expected): {exc}")
+    except Exception as exc:
+        print(f"[BROWSER] Teardown error ignored: {exc}")
+
+    # Stop uc's service subprocess so nothing is left running.
+    try:
+        service = getattr(driver, "service", None)
+        if service is not None:
+            service.stop()
+    except Exception:
+        pass
+
+
+def _patch_uc_del():
+    """Make undetected-chromedriver's __del__ swallow its teardown error.
+
+    uc.Chrome.__del__ calls self.quit() unguarded. On Windows that raises
+    OSError [WinError 6] 'The handle is invalid' during garbage collection,
+    which Python prints as 'Exception ignored in ...' well after the run has
+    already succeeded - so healthy runs looked broken. Guard it at the source;
+    this is the only way to stop the noise, since the traceback is emitted by
+    the interpreter after our own teardown code has finished.
+    """
+    chrome_cls = getattr(uc, "Chrome", None)
+    if chrome_cls is None or getattr(chrome_cls, "_ytbot_del_patched", False):
+        return
+    original_del = getattr(chrome_cls, "__del__", None)
+    if original_del is None:
+        return
+
+    def _safe_del(self):
+        try:
+            original_del(self)
+        except Exception:
+            pass
+
+    chrome_cls.__del__ = _safe_del
+    chrome_cls._ytbot_del_patched = True
+
+
+_patch_uc_del()
 
 
 # ---------------------------------------------------------------------------
@@ -752,34 +927,72 @@ def manual_login():
     """Interactive helper: sign in once in a real browser, then save the session.
 
     Run this on a machine with a display (or a VNC/X session) using
-        python -c "import comment; comment.manual_login()"
+        python save_session.py --headful
     Afterwards copy the sessions/ folder to the VPS; the headless bot reuses it
     and should stop being challenged.
+
+    The browser is deliberately left open until the SID/SSID session cookies
+    are actually stored, because closing it during a 2FA step invalidates the
+    very session we are trying to capture.
     """
-    if _is_headless() and os.getenv("HEADLESS_MODE", "1").strip() == "1":
-        print("[MANUAL] HEADLESS_MODE is 1 - set HEADLESS_MODE=0 so a window appears.")
+    # Manual login is interactive by definition, so never let a stray
+    # HEADLESS_MODE=1 hide the window the operator needs to use.
+    os.environ["HEADLESS_MODE"] = "0"
+
+    browser_path = resolve_browser_path()
+    if not browser_path:
+        print("[MANUAL] Cannot continue without a real Chrome install.")
+        return False
+    print(f"[MANUAL] Real browser: {browser_path}")
+    if _is_playwright_binary(browser_path):
+        print("[MANUAL] WARNING: this is Playwright Chromium; Google will likely challenge it.")
+
     if not _ensure_session_dir():
         return False
 
     email = input("Google email: ").strip()
+    if not email:
+        print("[MANUAL] No email given.")
+        return False
     password = getpass.getpass("Google password: ")
-    profile_dir, _ = session_paths(email)
-    print(f"[MANUAL] Session directory: {profile_dir}")
+    profile_dir, cookie_file = session_paths(email)
+    print(f"[MANUAL] Profile: {profile_dir}")
 
     driver = create_driver(profile_dir=profile_dir)
+    succeeded = False
     try:
-        ok = login(driver, email, password)
-        if ok:
-            print(f"[MANUAL] Session saved to {session_paths(email)[1]}")
+        succeeded = login(driver, email, password)
+
+        if succeeded and not has_session_cookies(driver):
+            # login() can clear via a UI probe; for manual capture we insist on
+            # the actual session cookies before writing the jar.
+            print("[MANUAL] Signed in, but no SID/SSID cookie yet - waiting...")
+            wait_for_session_cookies(driver, max(60, _manual_2fa_seconds()))
+
+        if has_session_cookies(driver):
+            names = sorted(session_cookie_names(driver) & set(PRIMARY_SESSION_COOKIES))
+            print(f"[MANUAL] Google session cookies present: {', '.join(names)}")
+            save_session(driver, email)
+
+            # Keep the window open so a slow 2FA step can still finish and any
+            # late cookies get captured on the second save below.
+            print("[MANUAL] The browser will stay OPEN until you press Enter.")
+            try:
+                input("[MANUAL] Finish any verification, then press Enter to save and close: ")
+            except EOFError:
+                pass
+            save_session(driver, email)
+            print(f"[MANUAL] Session saved to {cookie_file}")
             print("[MANUAL] Copy the whole sessions/ folder to the VPS.")
+            succeeded = True
         else:
             print("[MANUAL] Login did not complete - session NOT saved.")
-        return ok
+            _capture_failure(driver, "manual_incomplete")
+            succeeded = False
     finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
+        safe_quit(driver)
+
+    return succeeded
 
 
 # ---------------------------------------------------------------------------
@@ -896,10 +1109,6 @@ def process_comments(email, password, video_comments, delay_min_seconds=10, dela
 
         traceback.print_exc()
     finally:
-        if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+        safe_quit(driver)
 
     return results

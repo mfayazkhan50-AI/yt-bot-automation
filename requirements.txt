@@ -4,5 +4,8 @@ google-api-python-client>=2.0.0
 flask>=3.0.0
 python-dotenv>=1.0.0
 openai>=1.0.0
-playwright>=1.40.0
 gunicorn>=21.2.0
+
+# Real Google Chrome is required for login (Google flags Playwright's Chromium
+# with reCAPTCHA). Install via deploy/deploy.sh or https://www.google.com/chrome/.
+# Playwright is only needed if you explicitly opt in with ALLOW_PLAYWRIGHT_CHROMIUM=1.

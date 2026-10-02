@@ -95,22 +95,57 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
 # ---------------------------------------------------------------------------
-step "4/9  Install the Chromium binary (this VPS cannot use APT)"
-# Playwright downloads its own Chromium, bypassing the blocked Ubuntu mirrors.
-python -m pip install --upgrade playwright
-python -m playwright install chromium
+step "4/9  Install real Google Chrome"
+# Google fingerprints Playwright's Chromium and throws a reCAPTCHA at it on
+# every login, so real Chrome is required. This VPS cannot use the normal APT
+# mirrors, so the official .deb is fetched straight from dl.google.com.
+CHROME_BIN="$(command -v google-chrome || true)"
+if [ -z "${CHROME_BIN}" ] && [ -x /opt/google/chrome/chrome ]; then
+  CHROME_BIN=/opt/google/chrome/chrome
+fi
+
+if [ -n "${CHROME_BIN}" ]; then
+  echo "Real Chrome already installed: $(${CHROME_BIN} --version 2>/dev/null || echo unknown)"
+else
+  case "$(dpkg --print-architecture 2>/dev/null || echo amd64)" in
+    arm64|armhf) CHROME_DEB="google-chrome-stable_current_arm64.deb" ;;
+    *)           CHROME_DEB="google-chrome-stable_current_amd64.deb" ;;
+  esac
+  echo "Downloading ${CHROME_DEB} from dl.google.com ..."
+  if curl -fsSL -o /tmp/google-chrome.deb \
+      "https://dl.google.com/linux/direct/${CHROME_DEB}"; then
+    # dpkg does not resolve dependencies; -f install repairs them if the
+    # mirrors are reachable. If not, we still try to run and report clearly.
+    dpkg -i /tmp/google-chrome.deb || apt-get -f install -y || true
+    CHROME_BIN="$(command -v google-chrome || true)"
+    [ -z "${CHROME_BIN}" ] && [ -x /opt/google/chrome/chrome ] && CHROME_BIN=/opt/google/chrome/chrome
+    if [ -n "${CHROME_BIN}" ]; then
+      echo "Installed: $(${CHROME_BIN} --version 2>/dev/null || echo unknown)"
+    else
+      echo "WARNING: Chrome .deb installed but the binary is not on PATH."
+      echo "         Set CHROMIUM_PATH in .env manually."
+    fi
+  else
+    echo "WARNING: could not download Chrome from dl.google.com."
+    echo "         Playwright Chromium is NOT used for login (Google flags it)."
+    echo "         Install real Chrome, then re-run this script."
+  fi
+fi
 
 # ---------------------------------------------------------------------------
-step "5/9  Verify the browser binary is discoverable"
+step "5/9  Verify a real Chrome binary is discoverable"
 python -c "
 import sys
 sys.path.insert(0, '${PROJECT_DIR}')
-from comment import resolve_browser_path
+from comment import resolve_browser_path, _is_playwright_binary
 
 path = resolve_browser_path()
 print()
 if not path:
-    print('RESULT: FAIL - no Chrome/Chromium binary found')
+    print('RESULT: FAIL - no real Chrome binary found')
+    sys.exit(1)
+if _is_playwright_binary(path):
+    print('RESULT: FAIL - resolved to Playwright Chromium, which Google flags')
     sys.exit(1)
 print('RESULT: OK')
 print('CHROMIUM_PATH=' + path)
@@ -123,7 +158,7 @@ step "6/9  Headless driver self-test (start, load a page, quit)"
 python -c "
 import sys
 sys.path.insert(0, '${PROJECT_DIR}')
-from comment import create_driver
+from comment import create_driver, safe_quit
 
 driver = create_driver()
 try:
@@ -132,7 +167,7 @@ try:
     print('page title     :', driver.title)
     print('DRIVER TEST: PASS')
 finally:
-    driver.quit()
+    safe_quit(driver)
 "
 
 # ---------------------------------------------------------------------------

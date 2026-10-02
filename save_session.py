@@ -102,7 +102,16 @@ def authenticate(email, password, headless):
         bot._ensure_session_dir()
         driver = bot.create_driver(profile_dir=profile_dir)
 
-        if not bot.login(driver, email, password):
+        logged_in = bot.login(driver, email, password)
+
+        if not logged_in and not headless:
+            # Headful run: the operator may still be finishing a 2FA step in the
+            # visible window, so keep the browser open until the session cookies
+            # actually appear before declaring failure.
+            print("[RESULT] Waiting for you to finish the verification in the window...")
+            logged_in = bool(bot.wait_for_session_cookies(driver, bot._manual_2fa_seconds()))
+
+        if not logged_in:
             print(f"[RESULT] Login did not complete for {email}")
             return False
 
@@ -110,8 +119,8 @@ def authenticate(email, password, headless):
         # issued by the final YouTube visit.
         bot.save_session(driver, email)
 
-        if not bot.is_logged_in(driver):
-            print(f"[RESULT] Logged in but no Google session cookie was issued for {email}")
+        if not bot.has_session_cookies(driver):
+            print(f"[RESULT] Logged in but no SID/SSID session cookie was issued for {email}")
             return False
 
         print(f"[RESULT] Session successfully saved for {email}")
@@ -122,11 +131,7 @@ def authenticate(email, password, headless):
         print(f"[RESULT] ERROR authenticating {email}: {exc}")
         return False
     finally:
-        if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+        bot.safe_quit(driver)
 
 
 # ---------------------------------------------------------------------------
@@ -177,11 +182,11 @@ def main():
     browser = bot.resolve_browser_path()
     if not browser:
         print()
-        print("[FATAL] No Chrome/Chromium binary found.")
-        print("[FATAL] Fix it with:")
-        print("[FATAL]   python -m pip install playwright")
-        print("[FATAL]   python -m playwright install chromium")
-        print("[FATAL] or set CHROMIUM_PATH in .env")
+        print("[FATAL] No real Chrome/Chromium binary found.")
+        print("[FATAL] Playwright's Chromium is not used for login because")
+        print("[FATAL] Google flags it with reCAPTCHA. Install real Chrome:")
+        for line in bot._install_help():
+            print("[FATAL] " + line.replace("[BROWSER] ", ""))
         return 2
     print(f"[BROWSER] {browser}")
 

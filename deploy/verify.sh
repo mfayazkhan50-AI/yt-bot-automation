@@ -15,10 +15,13 @@ echo "=============================================================="
 "${VENV_PY}" -c "
 import sys
 sys.path.insert(0, '${PROJECT_DIR}')
-from comment import resolve_browser_path
+from comment import resolve_browser_path, _is_playwright_binary
 path = resolve_browser_path()
 print('CHROMIUM_PATH =', path or 'NOT FOUND')
-sys.exit(0 if path else 1)
+if not path or _is_playwright_binary(path):
+    print('RESULT: browser check FAILED - real Chrome required for login')
+    sys.exit(1)
+print('RESULT: real Chrome confirmed')
 " || echo "RESULT: browser check FAILED"
 
 echo

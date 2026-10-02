@@ -11,6 +11,7 @@ import time
 
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
@@ -1046,17 +1047,176 @@ def manual_login():
 # Commenting
 # ---------------------------------------------------------------------------
 
+ACCOUNT_UI_SELECTORS = (
+    "#avatar-btn",
+    "a#avatar-link",
+    "ytd-topbar-menu-button-renderer #avatar-btn",
+    "button[aria-label='Account menu']",
+    "button[aria-label*='Account']",
+)
+
+
+def _account_ui_present(driver, wait_seconds=0):
+    """True when a signed-in account avatar/menu is visible in the top bar."""
+    deadline = time.time() + max(0, wait_seconds)
+    while True:
+        for selector in ACCOUNT_UI_SELECTORS:
+            try:
+                if driver.find_elements(By.CSS_SELECTOR, selector):
+                    return True
+            except Exception:
+                pass
+        if time.time() >= deadline:
+            return False
+        time.sleep(1)
+
+
+def verify_logged_in(driver, timeout=20):
+    """Confirm the browser holds a real, usable YouTube login.
+
+    The account avatar is the reliable signal. Session cookies are only used to
+    decide whether it is worth revisiting youtube.com once, because cookies can
+    outlive a session YouTube has already invalidated for commenting.
+    """
+    if _account_ui_present(driver, wait_seconds=3):
+        return True
+    if not has_session_cookies(driver):
+        return False
+    try:
+        driver.get("https://www.youtube.com")
+    except Exception:
+        return False
+    return _account_ui_present(driver, wait_seconds=timeout)
+
+
+def _normalize_comment_text(text):
+    """Collapse whitespace so DOM/newline differences do not hide a match."""
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _comment_texts_in_dom(driver):
+    """Return the text of every rendered comment, excluding the composer."""
+    script = """
+        const out = [];
+        document.querySelectorAll('#content-text').forEach(function (node) {
+            if (node.closest('ytd-comment-simplebox-renderer, ytd-commentbox, ytd-comment-composer, #simple-box')) {
+                return;
+            }
+            out.push(node.textContent || '');
+        });
+        return out;
+    """
+    try:
+        return driver.execute_script(script) or []
+    except Exception:
+        return []
+
+
+def _wait_for_comment(driver, comment_text, timeout=20):
+    """Poll the comment list (nudging lazy-load) for the exact posted text."""
+    target = _normalize_comment_text(comment_text)
+    if not target:
+        return False
+    prefix = target[:40]
+    deadline = time.time() + max(1, timeout)
+    while time.time() < deadline:
+        for text in _comment_texts_in_dom(driver):
+            normalized = _normalize_comment_text(text)
+            if normalized == target or (prefix and prefix in normalized):
+                return True
+        try:
+            driver.execute_script(
+                "const c = document.querySelector('ytd-comments#comments') || "
+                "document.querySelector('#comments');"
+                "if (c) { c.scrollIntoView(); }"
+                "window.scrollBy(0, 500);"
+            )
+        except Exception:
+            pass
+        time.sleep(2)
+    return False
+
+
+def _verify_comment_live(driver, comment_text, timeout=20):
+    """Reload and confirm the comment survived - optimistic DOM is not enough.
+
+    YouTube briefly renders a submitted comment even when it is silently held
+    or dropped, so success is only declared if the text is still present after
+    a fresh page load (retried once in case the comment section lazy-loads).
+    """
+    try:
+        driver.refresh()
+        time.sleep(random.uniform(3, 5))
+    except Exception:
+        pass
+    if _wait_for_comment(driver, comment_text, timeout=timeout):
+        return True
+    try:
+        driver.refresh()
+        time.sleep(random.uniform(3, 5))
+    except Exception:
+        pass
+    return _wait_for_comment(driver, comment_text, timeout=timeout)
+
+
+def _human_type(element, text):
+    """Type character by character with human-like, slightly irregular timing."""
+    try:
+        element.click()
+    except Exception:
+        pass
+    try:
+        element.clear()
+    except Exception:
+        pass
+    next_break = random.randint(15, 25)
+    for index, char in enumerate(text):
+        element.send_keys(char)
+        if char == " ":
+            pause = random.uniform(0.06, 0.18)
+        elif char in ".,!?":
+            pause = random.uniform(0.12, 0.30)
+        else:
+            pause = random.uniform(0.04, 0.12)
+        time.sleep(pause)
+        if index >= next_break:
+            time.sleep(random.uniform(0.6, 1.5))
+            next_break = index + random.randint(15, 25)
+
+
+def _capture_comment_failure(driver, tag):
+    """Absolute-path screenshot so a failed/ghosted comment is diagnosable."""
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), f"comment_fail_{tag}_{stamp}.png"
+    )
+    try:
+        driver.save_screenshot(path)
+        print(f"[COMMENTER] Screenshot saved: {path}")
+    except Exception:
+        pass
+
+
 def post_comment(driver, video_url, comment_text, timeout=20):
+    # 1. Never type into the comment box while signed out - that is how a
+    #    "posted" log was produced for a comment that never actually existed.
+    if not verify_logged_in(driver):
+        print("[ERROR] Not logged in - skipping comment")
+        return False
+
     try:
         print(f"[COMMENTER] Navigating to: {video_url}")
         driver.set_page_load_timeout(60)
         driver.get(video_url)
-        time.sleep(random.uniform(5, 8))
+        time.sleep(random.uniform(4, 7))
         print(f"[COMMENTER] Page loaded. URL: {driver.current_url}")
     except Exception as exc:
         print(f"[COMMENTER] Failed to load video page: {exc}")
         return False
 
+    # Human-like: stop the video, then read down to the comment section.
     try:
         driver.find_element(
             By.CSS_SELECTOR,
@@ -1065,47 +1225,56 @@ def post_comment(driver, video_url, comment_text, timeout=20):
     except Exception:
         pass
 
-    time.sleep(2)
+    time.sleep(random.uniform(1.5, 3))
     driver.execute_script("window.scrollTo(0, 600);")
     time.sleep(random.uniform(2, 4))
 
     try:
         WebDriverWait(driver, timeout).until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, "ytd-comments ytd-comment-simplebox-renderer")
-            )
+            EC.presence_of_element_located((By.CSS_SELECTOR, "ytd-comments #placeholder-area"))
         )
 
-        driver.find_element(
-            By.CSS_SELECTOR,
-            "ytd-comments ytd-comment-simplebox-renderer div#placeholder-area",
-        ).click()
-        time.sleep(1)
+        placeholder = driver.find_element(By.CSS_SELECTOR, "ytd-comments #placeholder-area")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", placeholder)
+        time.sleep(random.uniform(0.8, 1.8))
 
-        comment_box = driver.find_element(By.CSS_SELECTOR, "#contenteditable-root")
-        comment_box.clear()
-        for char in comment_text:
-            comment_box.send_keys(char)
-            time.sleep(random.uniform(0.03, 0.09))
+        # Hover, pause, then click - as a person would - before typing.
+        try:
+            ActionChains(driver).move_to_element(placeholder).pause(
+                random.uniform(0.3, 0.8)
+            ).click().perform()
+        except Exception:
+            placeholder.click()
+        time.sleep(random.uniform(1.0, 2.0))
 
-        time.sleep(random.uniform(1, 2))
+        comment_box = WebDriverWait(driver, timeout).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "#contenteditable-root"))
+        )
+        _human_type(comment_box, comment_text)
+        time.sleep(random.uniform(1.5, 3.0))
+
         submit_btn = driver.find_element(By.ID, "submit-button")
-        driver.execute_script("arguments[0].scrollIntoView(true);", submit_btn)
-        time.sleep(1)
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_btn)
+        time.sleep(random.uniform(0.8, 1.5))
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.find_element(By.ID, "submit-button").is_enabled()
+        )
         driver.execute_script("arguments[0].click();", submit_btn)
         time.sleep(random.uniform(3, 5))
 
-        print(f"[COMMENTER] Comment posted: {comment_text[:60]}...")
-        return True
-
     except (TimeoutException, NoSuchElementException) as exc:
         print(f"[COMMENTER] Failed to post comment: {exc}")
-        try:
-            driver.save_screenshot("comment_fail.png")
-            print("[COMMENTER] Screenshot saved: comment_fail.png")
-        except Exception:
-            pass
+        _capture_comment_failure(driver, "submit")
         return False
+
+    # 2. A success log is only honest if the comment is still there after reload.
+    if not _verify_comment_live(driver, comment_text, timeout=timeout):
+        print("[WARNING] Ghost comment detected / YouTube dropped comment")
+        _capture_comment_failure(driver, "ghost")
+        return False
+
+    print(f"[COMMENTER] Comment posted: {comment_text[:60]}...")
+    return True
 
 
 def process_comments(email, password, video_comments, delay_min_seconds=10, delay_max_seconds=20):
@@ -1132,6 +1301,12 @@ def process_comments(email, password, video_comments, delay_min_seconds=10, dela
             return results
 
         time.sleep(3)
+
+        # Belt-and-braces: require a genuine account UI before touching a video.
+        if not verify_logged_in(driver):
+            print("[ERROR] Not logged in - skipping comment")
+            results["failed"] += len(video_comments)
+            return results
 
         for index, item in enumerate(video_comments):
             video_url = item["video"]["url"]

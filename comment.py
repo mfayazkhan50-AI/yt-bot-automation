@@ -1,4 +1,3 @@
-import glob
 import getpass
 import hashlib
 import json
@@ -281,9 +280,10 @@ def wait_for_manual_completion(driver, timeout, email):
 # ---------------------------------------------------------------------------
 # Browser binary resolution
 #
-# Google fingerprints Playwright's Chromium build and answers it with a
-# reCAPTCHA on essentially every sign-in, so a genuine Chrome/Chromium install
-# is resolved first and the Playwright download is opt-in only.
+# Only a genuine Chrome/Chromium install is used. Google fingerprints
+# Playwright's Chromium build and answers it with a reCAPTCHA on essentially
+# every sign-in, so that fallback has been removed entirely rather than left
+# as an opt-in that someone could trip over in production.
 # ---------------------------------------------------------------------------
 
 def _first_existing(paths):
@@ -293,14 +293,8 @@ def _first_existing(paths):
     return None
 
 
-def _playwright_allowed():
-    """Playwright Chromium is only ever used when explicitly opted into."""
-    return os.getenv("ALLOW_PLAYWRIGHT_CHROMIUM", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
-
-
 def _is_playwright_binary(path):
+    """True when a path points at Playwright's Chromium, which must not be used."""
     normalised = os.path.normpath(path or "").lower()
     return "ms-playwright" in normalised or "playwright" in normalised
 
@@ -319,47 +313,6 @@ def _install_help():
         "[BROWSER]   sudo dpkg -i /tmp/chrome.deb && sudo apt-get -f install -y",
         "[BROWSER] That comes from dl.google.com and does not need the APT mirrors.",
     ]
-
-
-def _playwright_candidates():
-    """Chromium binaries installed by `python -m playwright install chromium`."""
-    patterns = []
-
-    custom = os.getenv("PLAYWRIGHT_BROWSERS_PATH")
-    roots = [custom] if custom else []
-    roots.append(os.path.join(os.path.expanduser("~"), ".cache", "ms-playwright"))
-    roots.append("/ms-playwright")
-    roots.append(os.path.join(os.getenv("LOCALAPPDATA", ""), "ms-playwright") if os.name == "nt" else "")
-    roots.append(os.path.join(os.path.expanduser("~"), "Library", "Caches", "ms-playwright"))
-
-    for root in roots:
-        if not root:
-            continue
-        patterns += [
-            os.path.join(root, "chromium-*", "chrome-linux", "chrome"),
-            os.path.join(root, "chromium-*", "chrome-linux64", "chrome"),
-            os.path.join(root, "chromium-*", "chrome-win64", "chrome.exe"),
-            os.path.join(root, "chromium-*", "chrome-win", "chrome.exe"),
-            os.path.join(root, "chromium-*", "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"),
-            os.path.join(root, "chromium_headless_shell-*", "chrome-linux", "headless_shell"),
-            os.path.join(root, "chromium_headless_shell-*", "chrome-linux64", "headless_shell"),
-        ]
-
-    matches = []
-    for pattern in patterns:
-        matches.extend(p for p in glob.glob(pattern) if os.path.isfile(p))
-
-    # Prefer full Chromium over headless_shell, then highest version number.
-    matches.sort(key=lambda p: ("headless_shell" not in p, _version_key(p)))
-    return list(reversed(matches))
-
-
-def _version_key(path):
-    digits = ""
-    for part in os.path.normpath(path).split(os.sep):
-        if "-" in part and part.split("-")[-1].isdigit():
-            digits = part.split("-")[-1]
-    return int(digits) if digits else 0
 
 
 def _system_candidates():
@@ -412,17 +365,18 @@ def _on_path_candidates():
 def resolve_browser_path():
     """Return a genuine Chrome/Chromium path, or None with install guidance.
 
-    A genuine Chrome install is strongly preferred: Google serves a reCAPTCHA
-    to Playwright's Chromium build on essentially every login attempt.
+    Only a genuine Chrome/Chromium install is ever returned. Playwright's
+    Chromium is refused even when named explicitly, because Google fingerprints
+    that build and serves it a reCAPTCHA on essentially every login.
     """
     explicit = os.getenv("CHROMIUM_PATH") or os.getenv("BROWSER_PATH")
     if explicit:
         if not os.path.isfile(explicit):
             print(f"[BROWSER] WARNING: CHROMIUM_PATH does not exist: {explicit}")
-        elif _is_playwright_binary(explicit) and not _playwright_allowed():
+        elif _is_playwright_binary(explicit):
             print(f"[BROWSER] REFUSING Playwright Chromium set in CHROMIUM_PATH: {explicit}")
             print("[BROWSER] Google flags that build with reCAPTCHA on every login.")
-            print("[BROWSER] Set ALLOW_PLAYWRIGHT_CHROMIUM=1 only if you accept that.")
+            print("[BROWSER] Point CHROMIUM_PATH at a real Chrome binary instead.")
         else:
             print(f"[BROWSER] Using CHROMIUM_PATH from env: {explicit}")
             return explicit
@@ -436,15 +390,6 @@ def resolve_browser_path():
     if path_browser:
         print(f"[BROWSER] Using Chrome found on PATH: {path_browser}")
         return path_browser
-
-    if _playwright_allowed():
-        playwright_path = _first_existing(_playwright_candidates())
-        if playwright_path:
-            print(f"[BROWSER] WARNING: falling back to Playwright Chromium: {playwright_path}")
-            print("[BROWSER] Expect reCAPTCHA challenges until real Chrome is installed.")
-            return playwright_path
-    else:
-        print("[BROWSER] Skipping Playwright Chromium - Google flags it during login.")
 
     print("[BROWSER] ERROR: no genuine Chrome/Chromium install was found.")
     for line in _install_help():
@@ -811,12 +756,18 @@ def login(driver, email, password):
     wait = WebDriverWait(driver, 15)
     manual_timeout = _manual_2fa_seconds()
 
-    print("[LOGIN] Restoring saved session (if any)...")
-    load_session(driver, email)
-
     print("[LOGIN] Navigating to Google login...")
     driver.get(LOGIN_URL)
     time.sleep(4)
+
+    # Restore the saved cookie jar only after navigating onto the matching
+    # domain: Selenium rejects add_cookie() when the current page's domain does
+    # not match, so loading the jar while sitting on about:blank silently
+    # dropped every cookie. The persistent Chrome profile normally carries the
+    # session already; this also covers a sessions/<key>_cookies.json copied in
+    # on its own.
+    print("[LOGIN] Restoring saved session (if any)...")
+    load_session(driver, email)
 
     # A restored profile/cookie jar can bypass the whole login form.
     if is_logged_in(driver):

@@ -1295,6 +1295,20 @@ SUBMIT_SELECTORS = (
     "ytd-button-renderer#submit-button button",
 )
 
+# Markers used to detect videos whose comment section is switched off, so we can
+# skip them instead of burning the whole composer wait timeout.
+COMMENTS_DISABLED_SELECTORS = (
+    "ytd-comments[disabled]",
+    "ytd-comments-renderer[disabled]",
+    "#comments-disabled",
+)
+
+COMMENTS_OFF_TEXTS = (
+    "comments are turned off",
+    "comments are disabled",
+    "commenting is disabled",
+)
+
 
 def _first_clickable(driver, selectors, timeout=15):
     """Return the first displayed+enabled element matching any selector."""
@@ -1326,24 +1340,53 @@ def _any_present(driver, selectors):
     return False
 
 
+def _comments_disabled(driver):
+    """True when the video has its comments turned off."""
+    if _any_present(driver, COMMENTS_DISABLED_SELECTORS):
+        return True
+    try:
+        body = (driver.find_element(By.CSS_SELECTOR, "body").text or "").lower()
+    except Exception:
+        return False
+    return any(marker in body for marker in COMMENTS_OFF_TEXTS)
+
+
 def _scroll_to_comments(driver, timeout=20):
-    """Scroll until the comment composer renders (YouTube lazy-loads comments)."""
+    """Progressively scroll until the composer renders (YouTube lazy-loads it).
+
+    Returns "ready" once the composer is present, "disabled" if comments are
+    turned off for the video, or "timeout" if neither is reached in time.
+    """
     deadline = time.time() + max(0, timeout)
     while True:
         if _any_present(driver, PLACEHOLDER_SELECTORS):
-            return True
+            return "ready"
+        if _comments_disabled(driver):
+            return "disabled"
         try:
             driver.execute_script(
                 "const c = document.querySelector('ytd-comments#comments') || "
                 "document.querySelector('#comments');"
-                "if (c) { c.scrollIntoView({block: 'start'}); }"
-                "window.scrollBy(0, Math.max(400, window.innerHeight * 0.8));"
+                "if (c) { c.scrollIntoView({behavior: 'smooth', block: 'start'}); }"
+                "window.scrollBy(0, 500);"
             )
         except Exception:
             pass
         if time.time() >= deadline:
-            return _any_present(driver, PLACEHOLDER_SELECTORS)
+            break
         time.sleep(1)
+
+    # Harder final nudge so YouTube fires its yt-visibility-refresh event.
+    try:
+        driver.execute_script("window.scrollBy(0, 800);")
+    except Exception:
+        pass
+    time.sleep(2)
+    if _any_present(driver, PLACEHOLDER_SELECTORS):
+        return "ready"
+    if _comments_disabled(driver):
+        return "disabled"
+    return "timeout"
 
 
 def post_comment(driver, video_url, comment_text, timeout=20):
@@ -1378,7 +1421,11 @@ def post_comment(driver, video_url, comment_text, timeout=20):
 
     # The composer only exists once the comments section has scrolled into view,
     # so scroll-and-wait instead of a single blind scrollTo.
-    if not _scroll_to_comments(driver, timeout=max(15, timeout)):
+    status = _scroll_to_comments(driver, timeout=max(15, timeout))
+    if status == "disabled":
+        print("[COMMENTER] Comments are turned off for this video; skipping.")
+        return False
+    if status != "ready":
         print("[COMMENTER] Comment composer did not render after scrolling.")
         _capture_comment_failure(driver, "no_composer")
         return False

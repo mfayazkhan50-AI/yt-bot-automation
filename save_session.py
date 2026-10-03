@@ -79,7 +79,7 @@ def collect_accounts(config, business_filter=None, email_filter=None):
                 continue
             if email_filter and email.lower() != email_filter.lower():
                 continue
-            selected.append((key, name, email, password))
+            selected.append((key, name, email, password, account))
     return selected
 
 
@@ -87,7 +87,7 @@ def collect_accounts(config, business_filter=None, email_filter=None):
 # Authentication
 # ---------------------------------------------------------------------------
 
-def authenticate(email, password, headless):
+def authenticate(email, password, headless, account=None):
     """Log one account in and persist its session. Returns True on success."""
     profile_dir, cookie_file = bot.session_paths(email)
 
@@ -97,10 +97,19 @@ def authenticate(email, password, headless):
     print(f"[ACCOUNT] profile  : {profile_dir}")
     print(f"[ACCOUNT] headless : {headless}")
 
+    # Prefer the account's own proxy, then business/global/env (see resolve_proxy).
+    session_id = bot.new_proxy_session_id(email)
+    proxy = bot.resolve_proxy(account=account, session_id=session_id)
+    if proxy.get("host"):
+        print(f"[ACCOUNT] proxy    : {bot._redact_proxy(proxy)} "
+              f"(sticky session: {proxy.get('session') or 'none'})")
+    else:
+        print("[ACCOUNT] proxy    : none (direct)")
+
     driver = None
     try:
         bot._ensure_session_dir()
-        driver = bot.create_driver(profile_dir=profile_dir)
+        driver = bot.create_driver(profile_dir=profile_dir, proxy=proxy)
 
         logged_in = bot.login(driver, email, password)
 
@@ -207,7 +216,7 @@ def main():
         return 2
 
     print(f"[FOUND ] {len(accounts)} account(s) to authenticate")
-    for _, name, email, _pw in accounts:
+    for _key, name, email, _pw, _acct in accounts:
         print(f"         - {name}: {email}")
 
     if args.dry_run:
@@ -216,8 +225,8 @@ def main():
         return 0
 
     succeeded, failed = [], []
-    for _key, _name, email, password in accounts:
-        if authenticate(email, password, headless):
+    for _key, _name, email, password, account in accounts:
+        if authenticate(email, password, headless, account=account):
             succeeded.append(email)
         else:
             failed.append(email)

@@ -334,6 +334,8 @@ def run_bot_cycle(business_key):
                 "comment_delay_max_seconds",
                 biz.get("delay_max_seconds", 300),
             ),
+            account=account,
+            business=biz,
         )
 
         bot_status["progress"]["current"] += results["success"] + results["failed"]

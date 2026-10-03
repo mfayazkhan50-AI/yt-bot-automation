@@ -1,6 +1,8 @@
 {
   "youtube_api_key": "",
   "active_business": "business1",
+  "proxy_url": "",
+  "proxy_session_id": "",
   "businesses": {
     "business1": {
       "name": "New Airport Town",
@@ -43,6 +45,7 @@
       "delay_max_seconds": 600,
       "comment_delay_min_seconds": 150,
       "comment_delay_max_seconds": 300,
+      "proxy_url": "",
       "accounts": [],
       "topic": "Islamabad and Rawalpindi real estate: housing societies, plots for sale, property investment, house prices and land in projects such as TopCity, Faisal Town, Capital Smart City, Blue World City and near Islamabad International Airport",
       "relevance_check": true
@@ -79,6 +82,7 @@
       "delay_max_seconds": 600,
       "comment_delay_min_seconds": 150,
       "comment_delay_max_seconds": 300,
+      "proxy_url": "",
       "accounts": [],
       "topic": "online dating and dating apps: Tinder, Bumble, Hinge, dating profiles, dating tips, relationships, marriage and dating advice for adults",
       "relevance_check": true
@@ -119,10 +123,11 @@
       "delay_max_seconds": 600,
       "comment_delay_min_seconds": 150,
       "comment_delay_max_seconds": 300,
+      "proxy_url": "",
       "accounts": [],
       "topic": "study abroad and immigration: student visas, study permits, immigration to Canada and Australia, immigration consultants and study abroad consulting for Rawalpindi, Islamabad and Faisalabad",
       "relevance_check": true
     }
   },
-  "_comment": "Template config. Copy to config.json (cp config.example.json config.json) and add your Google accounts under each business. This file is safe to commit; config.json is not."
+  "_comment": "Template config. Copy to config.json (cp config.example.json config.json) and add your Google accounts under each business. This file is safe to commit; config.json is not. Optional residential proxy: set a global top-level proxy_url, a per-business proxy_url, or a per-account proxy_url inside accounts[] (e.g. {\"email\":\"...\",\"password\":\"...\",\"proxy_url\":\"http://user:pass@host:port\"}). Priority: account > business > global > PROXY_URL env. Use a {session} placeholder in the username (e.g. http://user-session-{session}:pass@host:port) for a sticky IP per commenting run; proxy_session_id pins a fixed token."
 }

@@ -7,7 +7,9 @@ import random
 import re
 import shutil
 import subprocess
+import tempfile
 import time
+from urllib.parse import unquote, urlparse
 
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
@@ -468,25 +470,134 @@ def load_config():
         return {"active_business": "business1", "businesses": {}}
 
 
-def get_proxy_config():
-    """Proxy settings from env vars, falling back to config.json."""
-    config = load_config()
-    proxy = {
-        "host": os.environ.get("PROXY_HOST", "").strip(),
-        "port": os.environ.get("PROXY_PORT", "").strip(),
-        "user": os.environ.get("PROXY_USER", "").strip(),
-        "password": os.environ.get("PROXY_PASS", "").strip(),
+def _redact_proxy(proxy):
+    """Human-readable proxy string with the password masked for logs."""
+    if not proxy or not proxy.get("host"):
+        return "(none)"
+    auth = f"{proxy['user']}:****@" if proxy.get("user") else ""
+    return f"{proxy.get('scheme', 'http')}://{auth}{proxy['host']}:{proxy['port']}"
+
+
+def _proxy_from_url(raw, session_id=""):
+    """Parse scheme://user:pass@host:port into a proxy dict.
+
+    A literal ``{session}`` placeholder in the URL is replaced with the sticky
+    session token, which is how residential providers keep one egress IP for
+    the whole batch (e.g. ``user-session-{session}:pass@host:port``).
+    Returns None when there is no usable host/port.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if "://" not in text:
+        text = "http://" + text
+    if session_id and "{session}" in text:
+        text = text.replace("{session}", session_id)
+    try:
+        parsed = urlparse(text)
+        port = parsed.port
+    except ValueError:
+        return None
+    host = parsed.hostname or ""
+    if not host or not port:
+        return None
+    return {
+        "scheme": (parsed.scheme or "http").lower(),
+        "host": host,
+        "port": str(port),
+        "user": unquote(parsed.username or ""),
+        "password": unquote(parsed.password or ""),
+        "session": session_id,
     }
 
-    if not proxy["host"] or not proxy["port"]:
-        proxy = {
-            "host": str(config.get("proxy_host", "") or "").strip(),
-            "port": str(config.get("proxy_port", "") or "").strip(),
-            "user": str(config.get("proxy_user", "") or "").strip(),
-            "password": str(config.get("proxy_pass", "") or "").strip(),
+
+def _proxy_from_mapping(mapping, session_id=""):
+    """Accept {'proxy_url': '...'} or legacy {'host','port','user','password'}."""
+    if not isinstance(mapping, dict):
+        return None
+    url = mapping.get("proxy_url") or mapping.get("url") or mapping.get("proxy")
+    if isinstance(url, dict):
+        return _proxy_from_mapping(url, session_id)
+    if isinstance(url, str) and url.strip():
+        return _proxy_from_url(url, session_id)
+
+    host = str(mapping.get("host") or mapping.get("proxy_host") or "").strip()
+    port = str(mapping.get("port") or mapping.get("proxy_port") or "").strip()
+    if not host or not port:
+        return None
+    return {
+        "scheme": str(mapping.get("scheme") or "http").lower(),
+        "host": host,
+        "port": port,
+        "user": str(mapping.get("user") or mapping.get("proxy_user") or "").strip(),
+        "password": str(mapping.get("password") or mapping.get("proxy_pass") or "").strip(),
+        "session": session_id,
+    }
+
+
+def new_proxy_session_id(email=""):
+    """Sticky, per-batch session token so the proxy pins one egress IP.
+
+    Honours PROXY_SESSION_ID when the operator wants a fixed session, otherwise
+    derives a fresh token from the account + start time so each run gets a
+    consistent-but-new IP.
+    """
+    existing = (os.environ.get("PROXY_SESSION_ID", "") or "").strip()
+    if existing:
+        return existing
+    seed = f"{email}-{time.time()}-{random.randint(0, 1_000_000)}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+
+
+def resolve_proxy(business=None, account=None, session_id=""):
+    """Resolve proxy settings by priority.
+
+    account > business > global config.json > PROXY_URL env > legacy PROXY_*
+    env > legacy config ``proxy_host``/``proxy_port`` keys. Returns a dict with
+    empty host/port when no proxy is configured (i.e. post directly).
+    """
+    config = load_config()
+    if isinstance(account, dict):
+        candidate = _proxy_from_mapping(account, session_id)
+    elif isinstance(account, str):
+        candidate = _proxy_from_url(account, session_id)
+    else:
+        candidate = None
+    sources = (
+        candidate,
+        _proxy_from_mapping(business, session_id),
+        _proxy_from_mapping(config, session_id),
+        _proxy_from_url(os.environ.get("PROXY_URL", ""), session_id),
+    )
+    for found in sources:
+        if found:
+            return found
+
+    host = os.environ.get("PROXY_HOST", "").strip()
+    port = os.environ.get("PROXY_PORT", "").strip()
+    if host and port:
+        return {
+            "scheme": "http",
+            "host": host,
+            "port": port,
+            "user": os.environ.get("PROXY_USER", "").strip(),
+            "password": os.environ.get("PROXY_PASS", "").strip(),
+            "session": session_id,
         }
 
-    return proxy
+    return {
+        "scheme": "http",
+        "host": "",
+        "port": "",
+        "user": "",
+        "password": "",
+        "session": session_id,
+    }
+
+
+def get_proxy_config(business=None, account=None, session_id=""):
+    """Backwards-compatible accessor used by save_session.py and callers."""
+    return resolve_proxy(business=business, account=account, session_id=session_id)
 
 
 def detect_browser_major(browser_path):
@@ -542,7 +653,101 @@ def _apply_proxy_auth(driver, proxy):
 # Driver
 # ---------------------------------------------------------------------------
 
-def _build_options():
+def _proxy_server_url(proxy):
+    """Chrome --proxy-server value for the configured proxy (empty if none)."""
+    if not (proxy and proxy.get("host") and proxy.get("port")):
+        return ""
+    scheme = (proxy.get("scheme") or "http").lower()
+    if scheme in ("socks4", "socks5"):
+        return f"{scheme}://{proxy['host']}:{proxy['port']}"
+    return f"http://{proxy['host']}:{proxy['port']}"
+
+
+def _write_proxy_auth_extension(proxy):
+    """Write an unpacked Chrome extension that sets the proxy and answers 407s.
+
+    Chrome's --proxy-server flag cannot carry credentials, so an authenticated
+    residential proxy needs an extension using chrome.webRequest.onAuthRequired.
+    Returns the extension directory, or None if it could not be written.
+    """
+    try:
+        ext_dir = tempfile.mkdtemp(prefix="ytbot_proxy_ext_")
+        manifest = {
+            "name": "ytbot proxy auth",
+            "version": "1.0.0",
+            "manifest_version": 3,
+            "permissions": ["proxy", "webRequest", "webRequestAuthProvider"],
+            "host_permissions": ["<all_urls>"],
+            "background": {"service_worker": "background.js"},
+        }
+        scheme = (proxy.get("scheme") or "http").lower()
+        if scheme not in ("http", "https", "socks4", "socks5"):
+            scheme = "http"
+        server = {
+            "scheme": scheme,
+            "host": proxy["host"],
+            "port": int(proxy["port"]),
+        }
+        background = (
+            "const PROXY = " + json.dumps(server) + ";\n"
+            "const USER = " + json.dumps(proxy.get("user", "")) + ";\n"
+            "const PASS = " + json.dumps(proxy.get("password", "")) + ";\n"
+            "chrome.proxy.settings.set({value: {mode: 'fixed_servers', rules: "
+            "{singleProxy: PROXY, bypassList: ['localhost', '127.0.0.1']}}, "
+            "scope: 'regular'}, function () {});\n"
+            "chrome.webRequest.onAuthRequired.addListener(\n"
+            "  function () { return {authCredentials: {username: USER, password: PASS}}; },\n"
+            "  {urls: ['<all_urls>']},\n"
+            "  ['blocking']\n"
+            ");\n"
+        )
+        with open(os.path.join(ext_dir, "manifest.json"), "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=2)
+        with open(os.path.join(ext_dir, "background.js"), "w", encoding="utf-8") as fh:
+            fh.write(background)
+        return ext_dir
+    except Exception as exc:
+        print(f"[BROWSER] WARNING: could not write proxy auth extension: {exc}")
+        return None
+
+
+def preflight_proxy(driver, proxy=None):
+    """Log the egress IP (via api.ipify.org) before any account is touched.
+
+    Confirms the proxy is reachable and shows which IP YouTube will see, so a
+    dead/expired proxy is caught up front instead of as a mystery 2FA loop.
+    """
+    if proxy is None:
+        proxy = get_proxy_config()
+    label = _redact_proxy(proxy) if proxy.get("host") else "direct (no proxy)"
+    print(f"[PROXY] Pre-flight IP check via api.ipify.org - {label}")
+    try:
+        driver.set_page_load_timeout(30)
+        driver.get("https://api.ipify.org?format=json")
+        body = ""
+        try:
+            body = (driver.find_element(By.TAG_NAME, "body").text or "").strip()
+        except Exception:
+            body = (driver.page_source or "").strip()
+        ip = body
+        try:
+            ip = json.loads(body).get("ip", body)
+        except Exception:
+            pass
+        print(f"[PROXY] Egress IP: {ip or 'unknown'}")
+        if proxy.get("host"):
+            print("[PROXY] Proxy reachable - continuing")
+        return ip
+    except Exception as exc:
+        print(f"[PROXY] WARNING: IP pre-flight failed: {exc}")
+        if proxy.get("host"):
+            print("[PROXY] WARNING: proxy may be down or rejecting credentials")
+        return None
+
+
+def _build_options(proxy=None):
+    if proxy is None:
+        proxy = get_proxy_config()
     options = uc.ChromeOptions()
 
     if _is_headless():
@@ -553,19 +758,27 @@ def _build_options():
 
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-notifications")
-    options.add_argument("--disable-extensions")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--lang=en-US")
     options.add_argument("--window-size=1920,1080")
 
-    proxy = get_proxy_config()
-    if proxy.get("host") and proxy.get("port"):
-        server = proxy["host"]
-        if not server.startswith(("http://", "https://", "socks5://")):
-            server = f"http://{server}"
-        options.add_argument(f"--proxy-server={server}:{proxy['port']}")
-        print(f"[BROWSER] Proxy enabled: {server}:{proxy['port']}")
+    server = _proxy_server_url(proxy)
+    if server:
+        options.add_argument(f"--proxy-server={server}")
+        print(f"[BROWSER] Proxy enabled: {_redact_proxy(proxy)}")
+        ext_dir = None
+        if proxy.get("user"):
+            ext_dir = _write_proxy_auth_extension(proxy)
+        if ext_dir:
+            # Keep only our auth extension so --disable-extensions cannot kill it.
+            options.add_argument(f"--disable-extensions-except={ext_dir}")
+            options.add_argument(f"--load-extension={ext_dir}")
+            print("[BROWSER] Proxy authentication extension loaded")
+        else:
+            options.add_argument("--disable-extensions")
+    else:
+        options.add_argument("--disable-extensions")
 
     return options, proxy
 
@@ -592,9 +805,9 @@ def _apply_debug_port(options):
     print(f"[BROWSER] Remote debugging enabled on 127.0.0.1:{port} (CDP)")
 
 
-def _uc_kwargs(browser_path, major=None, profile_dir=None):
+def _uc_kwargs(browser_path, major=None, profile_dir=None, proxy=None):
     """undetected-chromedriver rejects a reused ChromeOptions object, so build fresh."""
-    options, proxy = _build_options()
+    options, proxy = _build_options(proxy)
     kwargs = {"use_subprocess": True, "options": options}
     if browser_path:
         kwargs["browser_executable_path"] = browser_path
@@ -609,8 +822,13 @@ def _uc_kwargs(browser_path, major=None, profile_dir=None):
     return kwargs, proxy
 
 
-def create_driver(profile_dir=None):
-    """Start undetected-chromedriver with an explicit browser binary when available."""
+def create_driver(profile_dir=None, proxy=None):
+    """Start undetected-chromedriver with an explicit browser binary when available.
+
+    ``proxy`` may be a resolved proxy dict (see resolve_proxy); when omitted the
+    global/env proxy is used. After launch the egress IP is logged so a broken
+    proxy is obvious before any login is attempted.
+    """
     browser_path = resolve_browser_path()
 
     if not browser_path:
@@ -623,7 +841,7 @@ def create_driver(profile_dir=None):
         )
 
     major = detect_browser_major(browser_path)
-    kwargs, proxy = _uc_kwargs(browser_path, major, profile_dir)
+    kwargs, proxy = _uc_kwargs(browser_path, major, profile_dir, proxy)
 
     try:
         driver = uc.Chrome(**kwargs)
@@ -633,17 +851,17 @@ def create_driver(profile_dir=None):
 
         if reported_major and reported_major != major:
             print(f"[BROWSER] Retrying undetected-chromedriver pinned to major {reported_major}")
-            retry_kwargs, proxy = _uc_kwargs(browser_path, reported_major, profile_dir)
+            retry_kwargs, proxy = _uc_kwargs(browser_path, reported_major, profile_dir, proxy)
             try:
                 driver = uc.Chrome(**retry_kwargs)
             except Exception as retry_exc:
                 print(f"[BROWSER] undetected-chromedriver retry failed: {str(retry_exc).splitlines()[0][:160]}")
                 print("[BROWSER] Falling back to Selenium + Selenium Manager...")
-                options, proxy = _build_options()
+                options, proxy = _build_options(proxy)
                 driver = _create_with_selenium(options, browser_path, profile_dir)
         else:
             print("[BROWSER] Falling back to Selenium + Selenium Manager...")
-            options, proxy = _build_options()
+            options, proxy = _build_options(proxy)
             driver = _create_with_selenium(options, browser_path, profile_dir)
 
     try:
@@ -655,6 +873,7 @@ def create_driver(profile_dir=None):
         pass
 
     _apply_proxy_auth(driver, proxy)
+    preflight_proxy(driver, proxy)
     print(f"[BROWSER] Driver ready (headless={_is_headless()})")
     return driver
 
@@ -1563,7 +1782,8 @@ def post_comment(driver, video_url, comment_text, timeout=20):
     return True
 
 
-def process_comments(email, password, video_comments, delay_min_seconds=150, delay_max_seconds=300):
+def process_comments(email, password, video_comments, delay_min_seconds=150,
+                     delay_max_seconds=300, account=None, business=None):
     driver = None
     results = {"success": 0, "failed": 0}
 
@@ -1574,7 +1794,15 @@ def process_comments(email, password, video_comments, delay_min_seconds=150, del
     try:
         _ensure_session_dir()
         profile_dir, _ = session_paths(email)
-        driver = create_driver(profile_dir=profile_dir)
+
+        # One sticky session id per account/batch keeps a single proxy egress IP
+        # for the whole commenting run (providers pin the IP to the token).
+        session_id = new_proxy_session_id(email)
+        proxy = resolve_proxy(business=business, account=account, session_id=session_id)
+        if proxy.get("host"):
+            print(f"[PROXY] Using {_redact_proxy(proxy)} "
+                  f"(sticky session: {proxy.get('session') or 'none'})")
+        driver = create_driver(profile_dir=profile_dir, proxy=proxy)
         driver.set_page_load_timeout(60)
         driver.set_script_timeout(30)
 

@@ -41,6 +41,8 @@
       "daily_limit": 15,
       "delay_min_seconds": 300,
       "delay_max_seconds": 600,
+      "comment_delay_min_seconds": 150,
+      "comment_delay_max_seconds": 300,
       "accounts": [],
       "topic": "Islamabad and Rawalpindi real estate: housing societies, plots for sale, property investment, house prices and land in projects such as TopCity, Faisal Town, Capital Smart City, Blue World City and near Islamabad International Airport",
       "relevance_check": true
@@ -75,6 +77,8 @@
       "daily_limit": 15,
       "delay_min_seconds": 300,
       "delay_max_seconds": 600,
+      "comment_delay_min_seconds": 150,
+      "comment_delay_max_seconds": 300,
       "accounts": [],
       "topic": "online dating and dating apps: Tinder, Bumble, Hinge, dating profiles, dating tips, relationships, marriage and dating advice for adults",
       "relevance_check": true
@@ -113,6 +117,8 @@
       "daily_limit": 15,
       "delay_min_seconds": 300,
       "delay_max_seconds": 600,
+      "comment_delay_min_seconds": 150,
+      "comment_delay_max_seconds": 300,
       "accounts": [],
       "topic": "study abroad and immigration: student visas, study permits, immigration to Canada and Australia, immigration consultants and study abroad consulting for Rawalpindi, Islamabad and Faisalabad",
       "relevance_check": true

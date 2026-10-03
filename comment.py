@@ -1199,6 +1199,33 @@ def _capture_comment_failure(driver, tag):
         pass
 
 
+# A human watches/reads the video before commenting; posting within seconds of
+# arrival is a strong bot signal that gets comments silently dropped.
+PRE_COMMENT_DWELL_MIN_SECONDS = 20
+PRE_COMMENT_DWELL_MAX_SECONDS = 60
+
+# Short "reconsider" pause between finishing the text and pressing submit.
+SUBMIT_PAUSE_MIN_SECONDS = 2
+SUBMIT_PAUSE_MAX_SECONDS = 5
+
+
+def _pre_comment_dwell():
+    """Randomized 20-60s read/watch pause; override with PRE_COMMENT_DWELL_*."""
+    low, high = PRE_COMMENT_DWELL_MIN_SECONDS, PRE_COMMENT_DWELL_MAX_SECONDS
+    try:
+        low = float(os.environ.get("PRE_COMMENT_DWELL_MIN", low))
+        high = float(os.environ.get("PRE_COMMENT_DWELL_MAX", high))
+    except (TypeError, ValueError):
+        low, high = PRE_COMMENT_DWELL_MIN_SECONDS, PRE_COMMENT_DWELL_MAX_SECONDS
+    if high < low:
+        low, high = high, low
+    if high <= 0:
+        return
+    pause = random.uniform(low, high)
+    print(f"[COMMENTER] Reading/watching for {int(pause)}s before commenting...")
+    time.sleep(pause)
+
+
 def post_comment(driver, video_url, comment_text, timeout=20):
     # 1. Never type into the comment box while signed out - that is how a
     #    "posted" log was produced for a comment that never actually existed.
@@ -1228,6 +1255,10 @@ def post_comment(driver, video_url, comment_text, timeout=20):
     time.sleep(random.uniform(1.5, 3))
     driver.execute_script("window.scrollTo(0, 600);")
     time.sleep(random.uniform(2, 4))
+
+    # Watch/read the page for a while before engaging - posting immediately on
+    # arrival is what makes the second and later comments look automated.
+    _pre_comment_dwell()
 
     try:
         WebDriverWait(driver, timeout).until(
@@ -1259,6 +1290,10 @@ def post_comment(driver, video_url, comment_text, timeout=20):
         WebDriverWait(driver, timeout).until(
             lambda d: d.find_element(By.ID, "submit-button").is_enabled()
         )
+        # A human re-reads before hitting submit rather than firing instantly.
+        submit_pause = random.uniform(SUBMIT_PAUSE_MIN_SECONDS, SUBMIT_PAUSE_MAX_SECONDS)
+        print(f"[COMMENTER] Pausing {int(submit_pause)}s before submitting...")
+        time.sleep(submit_pause)
         driver.execute_script("arguments[0].click();", submit_btn)
         time.sleep(random.uniform(3, 5))
 
@@ -1277,7 +1312,7 @@ def post_comment(driver, video_url, comment_text, timeout=20):
     return True
 
 
-def process_comments(email, password, video_comments, delay_min_seconds=10, delay_max_seconds=20):
+def process_comments(email, password, video_comments, delay_min_seconds=150, delay_max_seconds=300):
     driver = None
     results = {"success": 0, "failed": 0}
 

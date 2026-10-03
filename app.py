@@ -322,8 +322,18 @@ def run_bot_cycle(business_key):
             email=account["email"],
             password=account["password"],
             video_comments=account_comments,
-            delay_min_seconds=biz.get("comment_delay_min_seconds", 10),
-            delay_max_seconds=biz.get("comment_delay_max_seconds", 20),
+            # Per-comment spacing. Falls back to the generic delay_* keys (and
+            # then a safe 150-300s) so a config that only defines delay_*
+            # cannot silently collapse to the 10-20s default that triggered
+            # YouTube's ghost/velocity filter.
+            delay_min_seconds=biz.get(
+                "comment_delay_min_seconds",
+                biz.get("delay_min_seconds", 150),
+            ),
+            delay_max_seconds=biz.get(
+                "comment_delay_max_seconds",
+                biz.get("delay_max_seconds", 300),
+            ),
         )
 
         bot_status["progress"]["current"] += results["success"] + results["failed"]

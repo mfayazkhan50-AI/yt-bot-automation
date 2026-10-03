@@ -20,6 +20,16 @@ LOGIN_URL = "https://accounts.google.com/AddSession?continue=https%3A%2F%2Fwww.y
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
+
+class SessionExpiredError(RuntimeError):
+    """Raised when the browser is signed out, so commenting must stop.
+
+    Distinguishing this from an ordinary per-video failure lets the caller
+    abort the whole account queue instead of clicking-and-failing on every
+    remaining video.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Session persistence / 2FA handling
 # ---------------------------------------------------------------------------
@@ -248,20 +258,13 @@ def wait_for_session_cookies(driver, timeout):
 
 
 def is_logged_in(driver):
-    """True when a Google session cookie exists, else probe the YouTube UI.
+    """True only when the browser actually renders a signed-in YouTube session.
 
-    Cookies alone are not enough right after injecting a jar (the page may
-    still be rendering), and the UI alone is not enough either. Check both.
+    Cookies are deliberately NOT trusted on their own here: an expired or
+    invalid jar still stores SID-named cookies, and treating those as a login
+    is what let the bot type a comment into a signed-out page.
     """
-    if has_session_cookies(driver):
-        return True
-    for selector in ("#avatar-btn", "a#avatar-link", "button[aria-label='Account menu']"):
-        try:
-            if driver.find_elements(By.CSS_SELECTOR, selector):
-                return True
-        except Exception:
-            pass
-    return False
+    return _login_state(driver) == "in"
 
 
 def _wait_for_password_or_challenge(driver, timeout):
@@ -822,7 +825,7 @@ def restore_session(driver, email):
         return False
 
     # The persistent Chrome profile may already be signed in.
-    if is_logged_in(driver):
+    if _login_state(driver, wait_seconds=6) == "in":
         print("[LOGIN] Browser profile is already signed in.")
         return True
 
@@ -843,11 +846,13 @@ def restore_session(driver, email):
 
     # Give YouTube a moment to paint the signed-in top bar after the cookies
     # are injected; the DOM can lag well behind the cookie store in headless.
-    if is_logged_in(driver) or _account_ui_present(driver, wait_seconds=10):
+    # Crucially, a cookie existing in the store is NOT accepted as proof of a
+    # login - the rendered UI (avatar / LOGGED_IN flag) must agree.
+    if _login_state(driver, wait_seconds=12) == "in":
         print("[LOGIN] Session restored from saved cookies.")
         return True
 
-    print("[LOGIN] Saved cookies did not establish a session.")
+    print("[LOGIN] Saved cookies did not establish a live session (they may be expired).")
     return False
 
 
@@ -963,8 +968,8 @@ def login(driver, email, password):
     except Exception as exc:
         print(f"[LOGIN] YouTube visit failed: {exc}")
 
-    if not is_logged_in(driver):
-        print("[LOGIN] WARNING - login flow finished but no session cookie was issued.")
+    if _login_state(driver, wait_seconds=10) != "in":
+        print("[LOGIN] WARNING - login flow finished but YouTube still renders signed out.")
         _capture_failure(driver, "not_signed_in")
         return False
 
@@ -1065,6 +1070,14 @@ SIGNED_OUT_SELECTORS = (
     "ytd-masthead ytd-button-renderer a[href*='signin']",
 )
 
+# Page copy YouTube shows when a signed-out visitor tries to engage.
+SIGNED_OUT_TEXTS = (
+    "want to join the conversation",
+    "sign in to continue",
+    "sign in to post a comment",
+    "sign in to comment",
+)
+
 
 def _account_ui_present(driver, wait_seconds=0):
     """True when a signed-in account avatar/menu is visible in the top bar."""
@@ -1092,45 +1105,82 @@ def _signed_out_ui_present(driver):
     return False
 
 
+def _yt_logged_in_flag(driver):
+    """YouTube's own LOGGED_IN flag: True, False, or None if unavailable.
+
+    This is the most reliable signal because it comes from YouTube's page
+    config rather than a DOM selector that keeps changing.
+    """
+    try:
+        return driver.execute_script(
+            "return (window.ytcfg && window.ytcfg.get) ? "
+            "(window.ytcfg.get('LOGGED_IN') === true) : null;"
+        )
+    except Exception:
+        return None
+
+
+def _signin_prompt_present(driver):
+    """True when the page copy invites the visitor to sign in to comment."""
+    try:
+        page = (driver.page_source or "").lower()
+    except Exception:
+        return False
+    return any(marker in page for marker in SIGNED_OUT_TEXTS)
+
+
+def _login_state(driver, wait_seconds=0):
+    """Classify the current page as 'in', 'out' or 'unknown'.
+
+    A live session cookie is NOT a signal here - only the rendered avatar, the
+    ytcfg LOGGED_IN flag, or the signed-out header/prompt are. This is what
+    stops a stale cookie jar from being mistaken for a valid login.
+    """
+    deadline = time.time() + max(0, wait_seconds)
+    while True:
+        flag = _yt_logged_in_flag(driver)
+        if flag is True or _account_ui_present(driver):
+            return "in"
+        if flag is False or _signed_out_ui_present(driver) or _signin_prompt_present(driver):
+            return "out"
+        if time.time() >= deadline:
+            return "unknown"
+        time.sleep(1)
+
+
 def session_ok(driver):
-    """Fast, tolerant login check: account avatar OR a real session cookie."""
-    return _account_ui_present(driver, wait_seconds=1) or has_session_cookies(driver)
+    """Strict, fast signed-in check used before each comment.
+
+    Unlike the old version this never accepts a bare session cookie - that was
+    the stale-cookie false positive. It requires the live ytcfg LOGGED_IN flag
+    or the account avatar, and explicitly rejects the signed-out header or the
+    'Sign in to continue' prompt.
+    """
+    return _login_state(driver, wait_seconds=3) == "in"
 
 
-def verify_logged_in(driver, timeout=10, reloads=2):
+def verify_logged_in(driver, timeout=12, reloads=2):
     """Confirm the browser holds a real, usable YouTube login.
 
-    The account avatar is the strongest signal, but the headless masthead can
-    paint several seconds after the cookies are in place - or only after a
-    reload. A single slow render used to produce a false "Not logged in" that
-    aborted an entire account's queue, so this reloads and re-waits, and only
-    reports failure when there is no session cookie at all. A live cookie is
-    trusted because the post-submit verification still catches comments that do
-    not actually go live.
+    Intentionally strict: an expired jar still stores SID-named cookies, so
+    cookies alone are never accepted. Success requires the live ytcfg
+    LOGGED_IN flag or the account avatar; the signed-out header or a
+    'Sign in to continue' prompt forces a failure. The page is reloaded a
+    couple of times first because the headless masthead can paint late.
     """
-    have_cookies = has_session_cookies(driver)
-
-    if _account_ui_present(driver, wait_seconds=3):
-        return True
-
-    if not have_cookies:
-        if _signed_out_ui_present(driver):
-            print("[LOGIN] YouTube shows the signed-out header and no session cookie exists.")
-        return False
-
     for attempt in range(max(1, reloads)):
-        try:
-            if attempt == 0:
-                driver.get("https://www.youtube.com")
-            else:
+        if attempt:
+            try:
                 driver.refresh()
-        except Exception:
-            pass
-        if _account_ui_present(driver, wait_seconds=timeout):
+            except Exception:
+                pass
+        if _login_state(driver, wait_seconds=max(3, timeout)) == "in":
             return True
 
-    print("[LOGIN] Avatar not detected after reloads, but a Google session cookie is present.")
-    return True
+    if _signed_out_ui_present(driver) or _signin_prompt_present(driver):
+        print("[LOGIN] YouTube shows the signed-out header / sign-in prompt.")
+    print("[LOGIN] No signed-in UI was rendered - treating the session as expired.")
+    return False
 
 
 def _normalize_comment_text(text):
@@ -1392,11 +1442,11 @@ def _scroll_to_comments(driver, timeout=20):
 def post_comment(driver, video_url, comment_text, timeout=20):
     # 1. Never type into the comment box while signed out - that is how a
     #    "posted" log was produced for a comment that never actually existed.
-    #    session_ok() is intentionally tolerant (avatar OR session cookie) so a
-    #    slow masthead render cannot skip a valid comment.
-    if not session_ok(driver):
-        print("[ERROR] Not logged in - skipping comment")
-        return False
+    #    _login_state() only accepts the rendered avatar / LOGGED_IN flag, so a
+    #    stale cookie jar can no longer masquerade as a valid login.
+    if _login_state(driver, wait_seconds=3) != "in":
+        print("[ERROR] Account signed out / Session expired - re-authentication required")
+        raise SessionExpiredError("signed out before commenting")
 
     try:
         print(f"[COMMENTER] Navigating to: {video_url}")
@@ -1407,6 +1457,12 @@ def post_comment(driver, video_url, comment_text, timeout=20):
     except Exception as exc:
         print(f"[COMMENTER] Failed to load video page: {exc}")
         return False
+
+    # Re-check after navigation: an expired session can resolve to the
+    # signed-out page here even if the previous page looked fine.
+    if _login_state(driver, wait_seconds=5) == "out":
+        print("[ERROR] Account signed out / Session expired - re-authentication required")
+        raise SessionExpiredError("session expired on the video page")
 
     # Human-like: stop the video, then read down to the comment section.
     try:
@@ -1532,16 +1588,18 @@ def process_comments(email, password, video_comments, delay_min_seconds=150, del
 
         time.sleep(3)
 
-        # Belt-and-braces session check. verify_logged_in() already retries and
-        # trusts a real session cookie, so a failure here is a genuine
-        # signed-out state. Repair once, and if that still fails leave the queue
-        # intact for the next cycle instead of burning all comments at once.
+        # Strict session check. verify_logged_in() only accepts the rendered
+        # signed-in UI, so a failure here is a genuine signed-out state. Repair
+        # once (which also refreshes the saved cookies), and if that still fails
+        # leave the queue intact for the next cycle instead of burning every
+        # comment while signed out.
         if not verify_logged_in(driver):
             print("[COMMENTER] Session not confirmed - attempting a fresh sign-in once...")
             if not login(driver, email, password) or not verify_logged_in(driver):
-                print("[ERROR] Not logged in - skipping comment")
+                print("[ERROR] Account signed out / Session expired - re-authentication required")
                 print("[COMMENTER] No usable session; leaving this queue for the next cycle.")
                 return results
+            save_session(driver, email)
 
         for index, item in enumerate(video_comments):
             video_url = item["video"]["url"]
@@ -1551,7 +1609,22 @@ def process_comments(email, password, video_comments, delay_min_seconds=150, del
             print(f"[COMMENTER] Video: {item['video'].get('title', '')}")
             print(f"[COMMENTER] Comment: {comment_text[:90]}")
 
-            if post_comment(driver, video_url, comment_text):
+            try:
+                posted = post_comment(driver, video_url, comment_text)
+            except SessionExpiredError:
+                print("[ERROR] Account signed out / Session expired - re-authentication required")
+                if not (login(driver, email, password) and verify_logged_in(driver)):
+                    print("[COMMENTER] Re-authentication failed - aborting this account's comments.")
+                    break
+                save_session(driver, email)
+                print("[COMMENTER] Re-authenticated - retrying the current comment.")
+                try:
+                    posted = post_comment(driver, video_url, comment_text)
+                except SessionExpiredError:
+                    print("[COMMENTER] Session lost again - aborting this account's comments.")
+                    break
+
+            if posted:
                 results["success"] += 1
             else:
                 results["failed"] += 1

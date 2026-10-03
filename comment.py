@@ -1270,6 +1270,82 @@ def _pre_comment_dwell():
     time.sleep(pause)
 
 
+# The composer is lazy-loaded and YouTube has changed its DOM over time, so try
+# several known markers before giving up.
+PLACEHOLDER_SELECTORS = (
+    "ytd-comments #placeholder-area",
+    "ytd-comment-simplebox-renderer #placeholder-area",
+    "ytd-commentbox #placeholder-area",
+    "#simple-box #placeholder-area",
+    "#simplebox-placeholder",
+    "ytd-comments ytd-comment-simplebox-renderer",
+    "#placeholder-area",
+)
+
+COMMENT_BOX_SELECTORS = (
+    "#contenteditable-root",
+    "ytd-commentbox #contenteditable-root",
+    "div#contenteditable-root[contenteditable='true']",
+    "div[contenteditable='true']",
+)
+
+SUBMIT_SELECTORS = (
+    "#submit-button",
+    "ytd-commentbox #submit-button",
+    "ytd-button-renderer#submit-button button",
+)
+
+
+def _first_clickable(driver, selectors, timeout=15):
+    """Return the first displayed+enabled element matching any selector."""
+    deadline = time.time() + max(0, timeout)
+    while True:
+        for selector in selectors:
+            try:
+                found = driver.find_elements(By.CSS_SELECTOR, selector)
+            except Exception:
+                found = []
+            for element in found:
+                try:
+                    if element.is_displayed() and element.is_enabled():
+                        return element
+                except Exception:
+                    continue
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.5)
+
+
+def _any_present(driver, selectors):
+    for selector in selectors:
+        try:
+            if driver.find_elements(By.CSS_SELECTOR, selector):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _scroll_to_comments(driver, timeout=20):
+    """Scroll until the comment composer renders (YouTube lazy-loads comments)."""
+    deadline = time.time() + max(0, timeout)
+    while True:
+        if _any_present(driver, PLACEHOLDER_SELECTORS):
+            return True
+        try:
+            driver.execute_script(
+                "const c = document.querySelector('ytd-comments#comments') || "
+                "document.querySelector('#comments');"
+                "if (c) { c.scrollIntoView({block: 'start'}); }"
+                "window.scrollBy(0, Math.max(400, window.innerHeight * 0.8));"
+            )
+        except Exception:
+            pass
+        if time.time() >= deadline:
+            return _any_present(driver, PLACEHOLDER_SELECTORS)
+        time.sleep(1)
+
+
 def post_comment(driver, video_url, comment_text, timeout=20):
     # 1. Never type into the comment box while signed out - that is how a
     #    "posted" log was produced for a comment that never actually existed.
@@ -1299,48 +1375,74 @@ def post_comment(driver, video_url, comment_text, timeout=20):
         pass
 
     time.sleep(random.uniform(1.5, 3))
-    driver.execute_script("window.scrollTo(0, 600);")
-    time.sleep(random.uniform(2, 4))
+
+    # The composer only exists once the comments section has scrolled into view,
+    # so scroll-and-wait instead of a single blind scrollTo.
+    if not _scroll_to_comments(driver, timeout=max(15, timeout)):
+        print("[COMMENTER] Comment composer did not render after scrolling.")
+        _capture_comment_failure(driver, "no_composer")
+        return False
 
     # Watch/read the page for a while before engaging - posting immediately on
     # arrival is what makes the second and later comments look automated.
     _pre_comment_dwell()
 
     try:
-        WebDriverWait(driver, timeout).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "ytd-comments #placeholder-area"))
-        )
+        placeholder = _first_clickable(driver, PLACEHOLDER_SELECTORS, timeout=timeout)
+        if placeholder is None:
+            print("[COMMENTER] Could not find the comment box placeholder.")
+            _capture_comment_failure(driver, "no_placeholder")
+            return False
 
-        placeholder = driver.find_element(By.CSS_SELECTOR, "ytd-comments #placeholder-area")
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", placeholder)
         time.sleep(random.uniform(0.8, 1.8))
 
-        # Hover, pause, then click - as a person would - before typing.
+        # Hover, pause, then click - as a person would - before typing. Fall back
+        # to a native then JS click if the element is covered by an overlay.
+        clicked = False
         try:
             ActionChains(driver).move_to_element(placeholder).pause(
                 random.uniform(0.3, 0.8)
             ).click().perform()
+            clicked = True
         except Exception:
-            placeholder.click()
+            pass
+        if not clicked:
+            try:
+                placeholder.click()
+            except Exception:
+                try:
+                    driver.execute_script("arguments[0].click();", placeholder)
+                except Exception:
+                    pass
         time.sleep(random.uniform(1.0, 2.0))
 
-        comment_box = WebDriverWait(driver, timeout).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, "#contenteditable-root"))
-        )
+        comment_box = _first_clickable(driver, COMMENT_BOX_SELECTORS, timeout=timeout)
+        if comment_box is None:
+            print("[COMMENTER] Comment editor did not appear after clicking the box.")
+            _capture_comment_failure(driver, "no_editor")
+            return False
         _human_type(comment_box, comment_text)
         time.sleep(random.uniform(1.5, 3.0))
 
-        submit_btn = driver.find_element(By.ID, "submit-button")
+        submit_btn = _first_clickable(driver, SUBMIT_SELECTORS, timeout=timeout)
+        if submit_btn is None:
+            print("[COMMENTER] Submit button was not found.")
+            _capture_comment_failure(driver, "no_submit")
+            return False
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_btn)
         time.sleep(random.uniform(0.8, 1.5))
         WebDriverWait(driver, timeout).until(
-            lambda d: d.find_element(By.ID, "submit-button").is_enabled()
+            lambda d: _first_clickable(d, SUBMIT_SELECTORS, timeout=0)
         )
         # A human re-reads before hitting submit rather than firing instantly.
         submit_pause = random.uniform(SUBMIT_PAUSE_MIN_SECONDS, SUBMIT_PAUSE_MAX_SECONDS)
         print(f"[COMMENTER] Pausing {int(submit_pause)}s before submitting...")
         time.sleep(submit_pause)
-        driver.execute_script("arguments[0].click();", submit_btn)
+        try:
+            submit_btn.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", submit_btn)
         time.sleep(random.uniform(3, 5))
 
     except (TimeoutException, NoSuchElementException) as exc:

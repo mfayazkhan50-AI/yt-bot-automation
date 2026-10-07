@@ -165,10 +165,8 @@ def _sanitize_cookie(cookie):
 def load_session(driver, email):
     """Inject a saved cookie jar into the CURRENT browser context.
 
-    The driver must already be sitting on the cookie's domain (youtube.com):
-    Selenium rejects add_cookie() when the page domain does not match, which is
-    why restoring while on accounts.google.com reported "Restored 0/22".
-    Returns True if at least one cookie was applied.
+    Navigate to youtube.com first so cookie domains match, and catch/log
+    individual add_cookie errors instead of silently dropping.
     """
     _, cookie_file = session_paths(email)
     if not os.path.isfile(cookie_file):
@@ -180,6 +178,13 @@ def load_session(driver, email):
         print(f"[SESSION] WARNING: could not read {cookie_file}: {exc}")
         return False
 
+    # Ensure we're on a domain where cookies apply
+    try:
+        driver.get("https://www.youtube.com/")
+        time.sleep(0.5)
+    except Exception:
+        pass
+
     applied = 0
     for cookie in cookies:
         cleaned = _sanitize_cookie(cookie)
@@ -188,10 +193,8 @@ def load_session(driver, email):
         try:
             driver.add_cookie(cleaned)
             applied += 1
-        except Exception:
-            # Cookies for a different domain (e.g. .google.com while the page
-            # is youtube.com) are expected to be rejected here.
-            pass
+        except Exception as exc:
+            print(f"[SESSION] WARNING: failed to add cookie {cleaned.get('name')}: {exc}")
     print(f"[SESSION] Restored {applied}/{len(cookies)} cookies for {email}")
     return applied > 0
 

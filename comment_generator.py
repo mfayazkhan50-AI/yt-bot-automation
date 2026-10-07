@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import os
 import re
 import time
@@ -31,7 +31,7 @@ def _clean_text(text):
     text = re.sub(r"^(comment|reply)\s*:\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^[-*\u2022]\s*", "", text)
     text = text.strip().strip("`").strip()
-    if len(text) > 1 and text[0] in "\"'“" and text[-1] in "\"'”":
+    if len(text) > 1 and text[0] in "\"'ΓÇ£" and text[-1] in "\"'ΓÇ¥":
         text = text[1:-1].strip()
     return re.sub(r"\s+", " ", text).strip()
 

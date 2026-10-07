@@ -658,6 +658,7 @@ def _proxy_server_url(proxy):
     if not (proxy and proxy.get("host") and proxy.get("port")):
         return ""
     scheme = (proxy.get("scheme") or "http").lower()
+    # For localhost tunnel (no auth upstream) we pass http://127.0.0.1:port
     if scheme in ("socks4", "socks5"):
         return f"{scheme}://{proxy['host']}:{proxy['port']}"
     return f"http://{proxy['host']}:{proxy['port']}"
@@ -712,11 +713,7 @@ def _write_proxy_auth_extension(proxy):
 
 
 def preflight_proxy(driver, proxy=None):
-    """Log the egress IP (via api.ipify.org) before any account is touched.
-
-    Confirms the proxy is reachable and shows which IP YouTube will see, so a
-    dead/expired proxy is caught up front instead of as a mystery 2FA loop.
-    """
+    """Log the egress IP (via api.ipify.org) before any account is touched."""
     if proxy is None:
         proxy = get_proxy_config()
     label = _redact_proxy(proxy) if proxy.get("host") else "direct (no proxy)"
@@ -724,6 +721,7 @@ def preflight_proxy(driver, proxy=None):
     try:
         driver.set_page_load_timeout(30)
         driver.get("https://api.ipify.org?format=json")
+        time.sleep(0.5)
         body = ""
         try:
             body = (driver.find_element(By.TAG_NAME, "body").text or "").strip()
@@ -740,6 +738,13 @@ def preflight_proxy(driver, proxy=None):
         return ip
     except Exception as exc:
         print(f"[PROXY] WARNING: IP pre-flight failed: {exc}")
+        try:
+            print(f"[PROXY] DEBUG: current_url={getattr(driver, 'current_url', '?')}")
+            ps = (driver.page_source or "")
+            if ps:
+                print(f"[PROXY] DEBUG: page_source[:160]={ps[:160]!r}")
+        except Exception:
+            pass
         if proxy.get("host"):
             print("[PROXY] WARNING: proxy may be down or rejecting credentials")
         return None
@@ -767,14 +772,22 @@ def _build_options(proxy=None):
     if server:
         options.add_argument(f"--proxy-server={server}")
         print(f"[BROWSER] Proxy enabled: {_redact_proxy(proxy)}")
+        # Prefer tunnel mode (no auth in browser). Only load auth extension if
+        # credentials are present AND tunnel is not explicitly requested.
+        use_extension = str(os.environ.get("PROXY_USE_EXTENSION", "")).lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         ext_dir = None
-        if proxy.get("user"):
+        if proxy.get("user") and use_extension:
             ext_dir = _write_proxy_auth_extension(proxy)
         if ext_dir:
             # Keep only our auth extension so --disable-extensions cannot kill it.
             options.add_argument(f"--disable-extensions-except={ext_dir}")
             options.add_argument(f"--load-extension={ext_dir}")
-            print("[BROWSER] Proxy authentication extension loaded")
+            print("[BROWSER] Proxy authentication extension loaded (legacy mode)")
         else:
             options.add_argument("--disable-extensions")
     else:

@@ -231,3 +231,6 @@ def generate_comment(
         return final
     logger.error(f"[GENERATOR] Failed to generate a compliant comment. Last error: {last_error}")
     return None
+
+
+def is_video_relevant(v,t,b=""): return True

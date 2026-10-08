@@ -51,7 +51,7 @@ fi
 echo
 echo "Preflight check - required secrets:"
 MISSING=""
-for var in OPENROUTER_API_KEY YOUTUBE_API_KEY DASHBOARD_USER DASHBOARD_PASS; do
+for var in GROQ_API_KEY YOUTUBE_API_KEY DASHBOARD_USER DASHBOARD_PASS; do
   if [ -z "$(grep -E "^${var}=." "${PROJECT_DIR}/.env" 2>/dev/null)" ]; then
     MISSING="${MISSING} ${var}"
   else

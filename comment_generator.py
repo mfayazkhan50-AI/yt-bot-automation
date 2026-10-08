@@ -1,7 +1,9 @@
 ﻿import logging
 import os
+import random
 import re
 import time
+from datetime import date
 
 from openai import OpenAI
 
@@ -9,14 +11,46 @@ logger = logging.getLogger("bot")
 
 MAX_RETRIES = 3
 
-FREE_FALLBACK_MODELS = [
-    "google/gemini-2.0-flash-exp:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "google/gemma-3-27b-it:free",
-    "moonshotai/kimi-k2:free",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "qwen/qwen2.5-72b-instruct:free",
-]
+# Groq free tier: 200,000 tokens/day. One short comment costs roughly
+# 300-400 tokens (prompt + completion) with a non-reasoning model, i.e.
+# ~500 comments/day. Reasoning models (openai/gpt-oss-*) burn hundreds of
+# extra tokens on hidden reasoning and need a much larger GROQ_MAX_TOKENS,
+# so prefer a non-reasoning model for short comments.
+DAILY_TOKEN_BUDGET = 200_000
+
+_usage_today = {"date": None, "prompt": 0, "completion": 0, "total": 0}
+
+
+def _reset_usage_if_new_day():
+    today = date.today().isoformat()
+    if _usage_today["date"] != today:
+        _usage_today.update(date=today, prompt=0, completion=0, total=0)
+
+
+def _usage_field(usage, name):
+    value = getattr(usage, name, None)
+    if value is None and isinstance(usage, dict):
+        value = usage.get(name)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _record_usage(usage):
+    """Track today's token spend against the Groq daily quota."""
+    if usage is None:
+        return
+    _reset_usage_if_new_day()
+    prompt = _usage_field(usage, "prompt_tokens")
+    completion = _usage_field(usage, "completion_tokens")
+    _usage_today["prompt"] += prompt
+    _usage_today["completion"] += completion
+    _usage_today["total"] += prompt + completion
+    logger.info(
+        "[LLM] tokens +%d prompt / +%d completion | today: %d/%d",
+        prompt, completion, _usage_today["total"], DAILY_TOKEN_BUDGET,
+    )
 
 
 def _get_client(base_url, api_key):
@@ -27,7 +61,7 @@ def _clean_text(text):
     text = (text or "").strip()
     text = re.sub(r"\s+", " ", text.replace("\n", " ").replace("\r", " "))
     text = re.sub(r"^(comment|reply)\s*:\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^[-*\u2022]\s*", "", text)
+    text = re.sub(r"^[-*•]\s*", "", text)
     text = text.strip().strip("`").strip()
     if len(text) > 1 and text[0] in "\"'“" and text[-1] in "\"'”":
         text = text[1:-1].strip()
@@ -48,8 +82,11 @@ def _truncate_words(text, max_words):
 
 def _join_contact(body, required_suffix):
     body = _clean_text(body).rstrip(" ,.;:-")
+    # The LLM often keeps the "Contact" prefix from the prompt; drop it
+    # so the line is not doubled ("Contact Contact 0312-...").
+    body = re.sub(r"\s+contact\s*$", "", body, flags=re.IGNORECASE).rstrip(" ,.;:-")
     if not body:
-        import random; c=random.choice(REAL_ESTATE_TEMPLATES); return _enforce(c, forbidden_terms, required_suffix, max_words)
+        return None
     return f"{body} Contact {required_suffix}"
 
 
@@ -98,7 +135,9 @@ def _build_user_message(video, prompt_rules, required_suffix, previous_comments)
     lines.append("")
     lines.append("Write ONE comment for this video.")
     if previous_comments:
-        recent = [c for c in previous_comments[-8:] if c]
+        # Keep the dedup context short: every extra comment costs input
+        # tokens, and the Groq free tier is capped at 200k tokens/day.
+        recent = [c for c in previous_comments[-4:] if c]
         if recent:
             lines.append("Your own previous comments (do NOT repeat their wording or opening):")
             for c in recent:
@@ -119,7 +158,7 @@ def _violates(text, forbidden_terms):
 def _enforce(text, forbidden_terms, required_suffix, max_words):
     text = _clean_text(text)
     if not text:
-        import random; c=random.choice(REAL_ESTATE_TEMPLATES); return _enforce(c, forbidden_terms, required_suffix, max_words)
+        return None
     if required_suffix:
         suffix_words = len(required_suffix.split()) + 1
         body = re.sub(re.escape(required_suffix), "", text, flags=re.IGNORECASE)
@@ -129,47 +168,29 @@ def _enforce(text, forbidden_terms, required_suffix, max_words):
 
 
 def _call_llm(messages, max_tokens):
-    # Try Groq first
-    croc_key = os.getenv("CROC_API_KEY") or os.getenv("OPENROUTER_API_KEY", "").strip()
-    croc_base = os.getenv("CROC_API_BASE", "https://openrouter.ai/api/v1").strip()
-    croc_model = os.getenv("CROC_MODEL", "openai/gpt-4o-mini").strip()
-    croc_temp = float(os.getenv("CROC_TEMPERATURE", "0.85"))
-    croc_max = int(os.getenv("CROC_MAX_TOKENS", str(max_tokens or 200)))
-    try:
-        if croc_key:
-            client = _get_client(croc_base, croc_key)
-            resp = client.chat.completions.create(
-                model=croc_model,
-                messages=messages,
-                temperature=croc_temp,
-                top_p=0.95,
-                max_tokens=croc_max,
-            )
-            return resp.choices[0].message.content
-    except Exception as exc:
-        logger.warning(f"[LLM] CROC failed: {exc}")
-
-    # Try Groq
+    """Generate a comment via Groq (OpenAI-compatible API). Sole provider."""
     groq_key = os.getenv("GROQ_API_KEY", "").strip()
+    if not groq_key:
+        logger.warning("[LLM] GROQ_API_KEY is empty - cannot call Groq")
+        return None
     groq_base = os.getenv("GROQ_API_BASE", "https://api.groq.com/openai/v1").strip()
-    groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
+    groq_model = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b").strip()
     groq_temp = float(os.getenv("GROQ_TEMPERATURE", "0.8"))
     groq_max = int(os.getenv("GROQ_MAX_TOKENS", str(max_tokens or 100)))
     try:
-        if groq_key:
-            client = _get_client(groq_base, groq_key)
-            resp = client.chat.completions.create(
-                model=groq_model,
-                messages=messages,
-                temperature=groq_temp,
-                top_p=0.95,
-                max_tokens=groq_max,
-            )
-            return resp.choices[0].message.content
+        client = _get_client(groq_base, groq_key)
+        resp = client.chat.completions.create(
+            model=groq_model,
+            messages=messages,
+            temperature=groq_temp,
+            top_p=0.95,
+            max_tokens=groq_max,
+        )
+        _record_usage(resp.usage)
+        return resp.choices[0].message.content
     except Exception as exc:
         logger.warning(f"[LLM] Groq failed: {exc}")
-    import random; c=random.choice(REAL_ESTATE_TEMPLATES); return _enforce(c, forbidden_terms, required_suffix, max_words)
-
+        return None
 
 
 REAL_ESTATE_TEMPLATES = [
@@ -178,6 +199,8 @@ REAL_ESTATE_TEMPLATES = [
     'Thanks for the detailed breakdown, helpful insights for buyers.',
     'Appreciate the clear updates on development progress!',
 ]
+
+
 def generate_comment(
     prompt=None,
     video=None,
@@ -191,7 +214,7 @@ def generate_comment(
 ):
     rules = prompt_rules or prompt or ""
     if video is None and prompt is None:
-        import random; c=random.choice(REAL_ESTATE_TEMPLATES); return _enforce(c, forbidden_terms, required_suffix, max_words)
+        return _enforce(random.choice(REAL_ESTATE_TEMPLATES), forbidden_terms, required_suffix, max_words)
     system_message = _build_system_message(
         business_name, business_info, rules, forbidden_terms, required_suffix
     )
@@ -205,6 +228,11 @@ def generate_comment(
             ], max_tokens=200)
             if not raw or not raw.strip():
                 last_error = "no content from LLM"
+                if attempt == 1:
+                    last_error += (
+                        " (if GROQ_MODEL is a reasoning model such as openai/gpt-oss-*, "
+                        "raise GROQ_MAX_TOKENS - hidden reasoning eats the whole budget)"
+                    )
                 logger.warning(f"[GENERATOR] attempt {attempt}/{MAX_RETRIES}: {last_error}")
                 time.sleep(1.5 * attempt)
                 continue
@@ -237,7 +265,8 @@ def generate_comment(
             continue
         return final
     logger.error(f"[GENERATOR] Failed to generate a compliant comment. Last error: {last_error}")
-    import random; c=random.choice(REAL_ESTATE_TEMPLATES); return _enforce(c, forbidden_terms, required_suffix, max_words)
+    return _enforce(random.choice(REAL_ESTATE_TEMPLATES), forbidden_terms, required_suffix, max_words)
 
 
-def is_video_relevant(v,t,b=""): return True
+def is_video_relevant(v, t, b=""):
+    return True

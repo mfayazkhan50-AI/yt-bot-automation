@@ -2,7 +2,7 @@
 """Pre-authenticate Google accounts and save reusable browser sessions.
 
 Standalone helper. It imports `comment` ONLY, so it never touches the YouTube
-Data API, never calls OpenRouter, and never generates a comment. It does not
+Data API, never calls Groq, and never generates a comment. It does not
 import `app`, so no Flask server and no bot loop are started either.
 
 For every account it:
@@ -173,8 +173,8 @@ def main():
     print("=" * 72)
     print("YT BOT - session saver")
     print("=" * 72)
-    print(f"[SCOPE] Browser + login only. No video search, no OpenRouter, no comments.")
-    print(f"[SCOPE] openrouter client imported: {'openai' in sys.modules} (must be False)")
+    print(f"[SCOPE] Browser + login only. No video search, no LLM, no comments.")
+    print(f"[SCOPE] openai client imported: {'openai' in sys.modules} (must be False)")
     print(f"[MODE ] headless={headless}"
           + ("  (--headful, complete 2FA by hand)" if not headless else ""))
     if not headless:

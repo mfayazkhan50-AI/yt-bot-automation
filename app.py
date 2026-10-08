@@ -54,7 +54,7 @@ def _validate_startup_env():
     return 401, which is indistinguishable from a wrong password. Log it once,
     loudly, at startup. Values are never logged - only set/EMPTY.
     """
-    keys = ("DASHBOARD_USER", "DASHBOARD_PASS", "OPENROUTER_API_KEY", "YOUTUBE_API_KEY", "LLM_MODEL")
+    keys = ("DASHBOARD_USER", "DASHBOARD_PASS", "GROQ_API_KEY", "YOUTUBE_API_KEY", "GROQ_MODEL")
     if not os.path.isfile(ENV_PATH):
         logger.warning(".env NOT found at %s - relying on the process environment only", ENV_PATH)
     logger.info("Env loaded from %s | %s", ENV_PATH, " ".join(
@@ -558,7 +558,7 @@ def settings():
         save_config(config)
         return jsonify({"success": True, "message": "Settings saved!"})
 
-    return render_template("settings.html", config=config, llm_model=os.environ.get("LLM_MODEL", "openrouter/auto"))
+    return render_template("settings.html", config=config, llm_model=os.environ.get("GROQ_MODEL", "qwen/qwen3.8-27b"))
 
 
 @app.route("/api/switch_business", methods=["POST"])

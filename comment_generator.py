@@ -129,7 +129,7 @@ def _enforce(text, forbidden_terms, required_suffix, max_words):
 
 
 def _call_llm(messages, max_tokens):
-    # Try CROC (OpenRouter) first
+    # Try Groq first
     croc_key = os.getenv("CROC_API_KEY") or os.getenv("OPENROUTER_API_KEY", "").strip()
     croc_base = os.getenv("CROC_API_BASE", "https://openrouter.ai/api/v1").strip()
     croc_model = os.getenv("CROC_MODEL", "openai/gpt-4o-mini").strip()

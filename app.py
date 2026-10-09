@@ -271,7 +271,12 @@ def run_bot_cycle(business_key):
             add_log("ERROR: every video was filtered out as irrelevant.")
             return
 
-    add_log(f"Generating comments (max {max_to_post} to post today)...")
+    # TEST_COMMENT bypasses the LLM entirely so a test run burns zero tokens.
+    test_comment = os.environ.get("TEST_COMMENT", "").strip()
+    if test_comment:
+        add_log(f"TEST MODE: using static comment, LLM skipped -> {test_comment[:60]}...")
+    else:
+        add_log(f"Generating comments (max {max_to_post} to post today)...")
     video_comments = []
     generated_comments = []
     for i, video in enumerate(videos[:max_to_post]):
@@ -279,16 +284,19 @@ def run_bot_cycle(business_key):
             add_log("Shutdown requested. Stopping comment generation.")
             break
 
-        comment = generate_comment(
-            video=video,
-            business_name=biz.get("name", ""),
-            business_info=business_info,
-            prompt_rules=prompt_rules,
-            forbidden_terms=forbidden_terms,
-            required_suffix=required_suffix,
-            previous_comments=generated_comments,
-            max_words=max_words,
-        )
+        if test_comment:
+            comment = test_comment
+        else:
+            comment = generate_comment(
+                video=video,
+                business_name=biz.get("name", ""),
+                business_info=business_info,
+                prompt_rules=prompt_rules,
+                forbidden_terms=forbidden_terms,
+                required_suffix=required_suffix,
+                previous_comments=generated_comments,
+                max_words=max_words,
+            )
 
         if comment:
             generated_comments.append(comment)

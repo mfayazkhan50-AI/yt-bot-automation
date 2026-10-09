@@ -1528,6 +1528,41 @@ def _capture_comment_failure(driver, tag):
         pass
 
 
+def _shot(driver, tag):
+    """Screenshot every commenting stage into screenshots/ for diagnosis."""
+    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screenshots")
+    try:
+        os.makedirs(folder, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(folder, f"{tag}_{stamp}.png")
+        driver.save_screenshot(path)
+        print(f"[SHOT] {tag} -> {path}")
+    except Exception as exc:
+        print(f"[SHOT] {tag} failed: {exc}")
+
+
+# Phrases YouTube shows to the author when a comment is held, not published.
+MODERATION_MARKERS = (
+    "awaiting moderation",
+    "held for review",
+    "your comment is under review",
+    "pending review",
+    "might be held for review",
+)
+
+
+def _moderation_notice(driver):
+    """Return the moderation phrase rendered on the page, or None."""
+    try:
+        body = driver.find_element(By.TAG_NAME, "body").text.lower()
+    except Exception:
+        return None
+    for marker in MODERATION_MARKERS:
+        if marker in body:
+            return marker
+    return None
+
+
 # A human watches/reads the video before commenting; posting within seconds of
 # arrival is a strong bot signal that gets comments silently dropped.
 PRE_COMMENT_DWELL_MIN_SECONDS = 20
@@ -1689,8 +1724,10 @@ def post_comment(driver, video_url, comment_text, timeout=20):
         driver.get(video_url)
         time.sleep(random.uniform(4, 7))
         print(f"[COMMENTER] Page loaded. URL: {driver.current_url}")
+        _shot(driver, "1_page_loaded")
     except Exception as exc:
         print(f"[COMMENTER] Failed to load video page: {exc}")
+        _shot(driver, "0_page_load_failed")
         return False
 
     # Re-check after navigation: an expired session can resolve to the
@@ -1760,8 +1797,10 @@ def post_comment(driver, video_url, comment_text, timeout=20):
             print("[COMMENTER] Comment editor did not appear after clicking the box.")
             _capture_comment_failure(driver, "no_editor")
             return False
+        _shot(driver, "2_editor_open")
         _human_type(comment_box, comment_text)
         time.sleep(random.uniform(1.5, 3.0))
+        _shot(driver, "3_typed_before_submit")
 
         submit_btn = _first_clickable(driver, SUBMIT_SELECTORS, timeout=timeout)
         if submit_btn is None:
@@ -1782,6 +1821,7 @@ def post_comment(driver, video_url, comment_text, timeout=20):
         except Exception:
             driver.execute_script("arguments[0].click();", submit_btn)
         time.sleep(random.uniform(3, 5))
+        _shot(driver, "4_after_submit")
 
     except (TimeoutException, NoSuchElementException) as exc:
         print(f"[COMMENTER] Failed to post comment: {exc}")
@@ -1792,8 +1832,13 @@ def post_comment(driver, video_url, comment_text, timeout=20):
     if not _verify_comment_live(driver, comment_text, timeout=timeout):
         print("[WARNING] Ghost comment detected / YouTube dropped comment")
         _capture_comment_failure(driver, "ghost")
+        _shot(driver, "5_ghost_after_reload")
         return False
 
+    _shot(driver, "5_verified_after_reload")
+    notice = _moderation_notice(driver)
+    if notice:
+        print(f"[COMMENTER] MODERATION notice visible on page: '{notice}'")
     print(f"[COMMENTER] Comment posted: {comment_text[:60]}...")
     return True
 

@@ -9,6 +9,10 @@ from googleapiclient.errors import HttpError
 MAX_RESULTS_PER_CALL = 50
 QUOTA_ERROR_CODES = {403, 429}
 
+# Set by find_videos() when the YouTube Data API reports quota exhaustion.
+# app.py reads this to back off for a long time instead of hammering the API.
+last_search_quota_exhausted = False
+
 
 def _sanitize_keyword(keyword):
     """Trim whitespace/newlines and collapse inner spacing from a keyword."""
@@ -59,6 +63,9 @@ def find_videos(api_key, keywords, max_results=30, video_duration="medium", orde
     Never raises: a failed keyword is logged and the loop continues.
     De-duplicates videos so overlapping keywords never post twice.
     """
+    global last_search_quota_exhausted
+    last_search_quota_exhausted = False
+
     keywords = sanitize_keywords(keywords)
     max_results = max(1, int(max_results or 1))
 
@@ -105,6 +112,7 @@ def find_videos(api_key, keywords, max_results=30, video_duration="medium", orde
             print(f"[VIDEO FINDER] API error for '{keyword}': {reason}")
             if "quota" in reason.lower() or "rate limit" in reason.lower():
                 print("[VIDEO FINDER] Quota exhausted - skipping remaining keywords.")
+                last_search_quota_exhausted = True
                 break
             continue
         except Exception as exc:

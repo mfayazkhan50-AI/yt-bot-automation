@@ -10,7 +10,7 @@ import subprocess
 import logging
 import signal
 import sys
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from logging.handlers import RotatingFileHandler
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, Response
@@ -27,6 +27,7 @@ ENV_PATH = os.path.join(BASE_DIR, ".env")
 load_dotenv(ENV_PATH, override=True)
 
 from video_finder import find_videos                                 # noqa: E402
+import video_finder as _video_finder                                 # noqa: E402
 from comment_generator import (                                      # noqa: E402
     generate_comment,
     is_video_relevant,
@@ -90,6 +91,9 @@ bot_status = {
     # bot pauses cleanly instead of crashing or posting template filler.
     "llm_limit_hit": False,
     "llm_limit_message": None,
+    # ISO timestamp until which the YouTube Data API search should be skipped
+    # after a 429/quota error (set by run_bot_cycle, checked in bot_loop).
+    "yt_quota_backoff_until": None,
 }
 
 shutdown_flag = False
@@ -131,12 +135,17 @@ def ensure_new_day():
         return False
 
     previous = bot_status["cycle_date"]
-    bot_status["daily_counts"] = {}
-    bot_status["today_comments"] = 0
-    bot_status["current_biz_index"] = 0
+    if previous:
+        # Real day rollover: wipe the counters.
+        bot_status["daily_counts"] = {}
+        bot_status["today_comments"] = 0
+        bot_status["current_biz_index"] = 0
+        bot_status["llm_limit_hit"] = False
+        bot_status["llm_limit_message"] = None
+    # First call of this process (previous is None): keep whatever
+    # load_state() restored and just stamp today's date - otherwise a
+    # restart would wipe the counters it just loaded.
     bot_status["cycle_date"] = today
-    bot_status["llm_limit_hit"] = False
-    bot_status["llm_limit_message"] = None
     save_state(bot_status["daily_counts"])
 
     if previous:
@@ -262,7 +271,13 @@ def run_bot_cycle(business_key):
     )
 
     if not videos:
-        add_log("ERROR: No videos found!")
+        if _video_finder.last_search_quota_exhausted:
+            add_log("YouTube API quota exhausted - backing off 60 minutes.")
+            bot_status["yt_quota_backoff_until"] = (
+                datetime.now() + timedelta(minutes=60)
+            ).isoformat(timespec="seconds")
+        else:
+            add_log("ERROR: No videos found!")
         return
 
     add_log(f"Found {len(videos)} videos")
@@ -447,6 +462,19 @@ def bot_loop():
                 _wait_with_shutdown(600)
                 continue
 
+            # YouTube Data API quota exhausted: back off until the deadline
+            # set by run_bot_cycle (60 min) instead of hammering the API.
+            yt_until = bot_status.get("yt_quota_backoff_until")
+            if yt_until:
+                try:
+                    if datetime.fromisoformat(yt_until) > datetime.now():
+                        add_log_once("YouTube quota backoff active - waiting for reset.")
+                        _wait_with_shutdown(300)
+                        continue
+                except ValueError:
+                    pass
+                bot_status["yt_quota_backoff_until"] = None
+
             config = load_config()
             biz_keys = list(config.get("businesses", {}).keys())
 
@@ -506,7 +534,7 @@ def bot_loop():
 
 
 def _wait_with_shutdown(seconds):
-    for _ in range(seconds):
+    for _ in range(int(seconds)):
         if shutdown_flag:
             break
         time.sleep(1)

@@ -689,7 +689,8 @@ def restart_service():
     })
 
 
-@app.route("/api/switch_business", methods=["POST"])@require_auth
+@app.route("/api/switch_business", methods=["POST"])
+@require_auth
 def switch_business():
     config = load_config()
     data = request.json

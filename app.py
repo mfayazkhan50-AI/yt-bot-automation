@@ -94,6 +94,11 @@ bot_status = {
     # ISO timestamp until which the YouTube Data API search should be skipped
     # after a 429/quota error (set by run_bot_cycle, checked in bot_loop).
     "yt_quota_backoff_until": None,
+    # Unified "today is finished" flag: True when the LLM daily limit OR the
+    # YouTube API quota ran out. The bot idles politely until midnight instead
+    # of crashing; ensure_new_day() clears it and the next day starts fresh.
+    "today_done": False,
+    "today_done_reason": None,
 }
 
 shutdown_flag = False
@@ -142,6 +147,8 @@ def ensure_new_day():
         bot_status["current_biz_index"] = 0
         bot_status["llm_limit_hit"] = False
         bot_status["llm_limit_message"] = None
+        bot_status["today_done"] = False
+        bot_status["today_done_reason"] = None
     # First call of this process (previous is None): keep whatever
     # load_state() restored and just stamp today's date - otherwise a
     # restart would wipe the counters it just loaded.
@@ -272,10 +279,9 @@ def run_bot_cycle(business_key):
 
     if not videos:
         if _video_finder.last_search_quota_exhausted:
-            add_log("YouTube API quota exhausted - backing off 60 minutes.")
-            bot_status["yt_quota_backoff_until"] = (
-                datetime.now() + timedelta(minutes=60)
-            ).isoformat(timespec="seconds")
+            add_log("YouTube API quota exhausted - today's work is done. Bot will resume tomorrow.")
+            bot_status["today_done"] = True
+            bot_status["today_done_reason"] = "YouTube API quota exhausted"
         else:
             add_log("ERROR: No videos found!")
         return
@@ -340,6 +346,8 @@ def run_bot_cycle(business_key):
                 # Groq daily quota exhausted: pause the bot for today instead of
                 # crashing. Already-generated comments are still worth posting.
                 bot_status["llm_limit_hit"] = True
+                bot_status["today_done"] = True
+                bot_status["today_done_reason"] = "LLM daily token limit reached"
                 bot_status["llm_limit_message"] = (
                     "Ajj ka LLM limit (200k tokens) poora ho gaya. "
                     "Bot aaj ke liye stop - kal automatically dubara start hoga."
@@ -453,27 +461,16 @@ def bot_loop():
             # Midnight: clear every counter and restart the cycle at business1.
             ensure_new_day()
 
-            # Groq daily quota exhausted earlier today: idle until midnight,
-            # then ensure_new_day() clears the flag and the bot resumes by itself.
-            if bot_status["llm_limit_hit"]:
+            # LLM daily limit OR YouTube API quota exhausted: idle politely
+            # until midnight. ensure_new_day() clears the flag and the bot
+            # resumes by itself - never crashes.
+            if bot_status["today_done"]:
+                reason = bot_status.get("today_done_reason") or "daily limit"
                 add_log_once(
-                    "LLM limit active - bot paused. It will restart automatically after midnight."
+                    f"Today's work done ({reason}) - bot paused, will restart automatically tomorrow."
                 )
                 _wait_with_shutdown(600)
                 continue
-
-            # YouTube Data API quota exhausted: back off until the deadline
-            # set by run_bot_cycle (60 min) instead of hammering the API.
-            yt_until = bot_status.get("yt_quota_backoff_until")
-            if yt_until:
-                try:
-                    if datetime.fromisoformat(yt_until) > datetime.now():
-                        add_log_once("YouTube quota backoff active - waiting for reset.")
-                        _wait_with_shutdown(300)
-                        continue
-                except ValueError:
-                    pass
-                bot_status["yt_quota_backoff_until"] = None
 
             config = load_config()
             biz_keys = list(config.get("businesses", {}).keys())
@@ -761,6 +758,8 @@ def get_status():
         "total_businesses": len(config.get("businesses", {})),
         "llm_limit_hit": bot_status.get("llm_limit_hit", False),
         "llm_limit_message": bot_status.get("llm_limit_message"),
+        "today_done": bot_status.get("today_done", False),
+        "today_done_reason": bot_status.get("today_done_reason"),
     })
 
 

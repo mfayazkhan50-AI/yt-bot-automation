@@ -133,7 +133,11 @@
                     document.getElementById('last-run').textContent = data.last_run || 'Never';
 
                     const banner = document.getElementById('llmLimitBanner');
-                    if (data.llm_limit_hit) {
+                    if (data.today_done) {
+                        const reason = data.today_done_reason ? ' (' + data.today_done_reason + ')' : '';
+                        banner.textContent = 'Aaj ka kaam complete' + reason + ' - bot kal automatically restart hoga.';
+                        banner.style.display = 'block';
+                    } else if (data.llm_limit_hit) {
                         banner.textContent = data.llm_limit_message ||
                             'Ajj ka LLM limit poora ho gaya. Bot kal automatically start hoga.';
                         banner.style.display = 'block';

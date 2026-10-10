@@ -5,6 +5,8 @@ import os
 import random
 import secrets
 import shutil
+import hashlib
+import subprocess
 import logging
 import signal
 import sys
@@ -25,7 +27,11 @@ ENV_PATH = os.path.join(BASE_DIR, ".env")
 load_dotenv(ENV_PATH, override=True)
 
 from video_finder import find_videos                                 # noqa: E402
-from comment_generator import generate_comment, is_video_relevant    # noqa: E402
+from comment_generator import (                                      # noqa: E402
+    generate_comment,
+    is_video_relevant,
+    LLMLimitReached,
+)
 from comment import process_comments                                 # noqa: E402
 
 app = Flask(__name__)
@@ -80,6 +86,10 @@ bot_status = {
     "daily_counts": {},
     "cycle_date": None,
     "current_biz_index": 0,  # 0=business1, 1=business2, 2=business3
+    # Set when the Groq daily token quota runs out; cleared at midnight so the
+    # bot pauses cleanly instead of crashing or posting template filler.
+    "llm_limit_hit": False,
+    "llm_limit_message": None,
 }
 
 shutdown_flag = False
@@ -125,10 +135,12 @@ def ensure_new_day():
     bot_status["today_comments"] = 0
     bot_status["current_biz_index"] = 0
     bot_status["cycle_date"] = today
+    bot_status["llm_limit_hit"] = False
+    bot_status["llm_limit_message"] = None
     save_state(bot_status["daily_counts"])
 
     if previous:
-        add_log(f"New day ({today}) - all daily counters reset and cycle restarted at business1.")
+        add_log(f"New day ({today}) - all daily counters reset, LLM quota refreshed, cycle restarted at business1.")
     else:
         add_log(f"Daily counters initialised for {today}, cycle starts at business1.")
     return True
@@ -201,6 +213,17 @@ def add_log(message):
     if len(bot_status["logs"]) > 100:
         bot_status["logs"] = bot_status["logs"][-100:]
     logger.info(message)
+
+
+_logged_once = set()
+
+
+def add_log_once(message):
+    """Log a repeating-loop message only once per process lifetime."""
+    if message in _logged_once:
+        return
+    _logged_once.add(message)
+    add_log(message)
 
 
 def run_bot_cycle(business_key):
@@ -287,16 +310,28 @@ def run_bot_cycle(business_key):
         if test_comment:
             comment = test_comment
         else:
-            comment = generate_comment(
-                video=video,
-                business_name=biz.get("name", ""),
-                business_info=business_info,
-                prompt_rules=prompt_rules,
-                forbidden_terms=forbidden_terms,
-                required_suffix=required_suffix,
-                previous_comments=generated_comments,
-                max_words=max_words,
-            )
+            try:
+                comment = generate_comment(
+                    video=video,
+                    business_name=biz.get("name", ""),
+                    business_info=business_info,
+                    prompt_rules=prompt_rules,
+                    forbidden_terms=forbidden_terms,
+                    required_suffix=required_suffix,
+                    previous_comments=generated_comments,
+                    max_words=max_words,
+                )
+            except LLMLimitReached as exc:
+                # Groq daily quota exhausted: pause the bot for today instead of
+                # crashing. Already-generated comments are still worth posting.
+                bot_status["llm_limit_hit"] = True
+                bot_status["llm_limit_message"] = (
+                    "Ajj ka LLM limit (200k tokens) poora ho gaya. "
+                    "Bot aaj ke liye stop - kal automatically dubara start hoga."
+                )
+                add_log(f"LLM LIMIT REACHED: {exc}")
+                add_log(bot_status["llm_limit_message"])
+                break
 
         if comment:
             generated_comments.append(comment)
@@ -307,8 +342,17 @@ def run_bot_cycle(business_key):
         time.sleep(1)
 
     if not video_comments:
-        add_log("ERROR: No compliant comments generated!")
+        if bot_status["llm_limit_hit"]:
+            add_log("No comments were generated before the LLM limit. Bot stops for today.")
+        else:
+            add_log("ERROR: No compliant comments generated!")
         return
+
+    if bot_status["llm_limit_hit"]:
+        add_log(
+            f"Posting the {len(video_comments)} comment(s) already generated, "
+            "then stopping for today (LLM limit)."
+        )
 
     total_comments = min(len(video_comments), max_to_post)
     bot_status["progress"]["total"] = total_comments
@@ -393,6 +437,15 @@ def bot_loop():
         try:
             # Midnight: clear every counter and restart the cycle at business1.
             ensure_new_day()
+
+            # Groq daily quota exhausted earlier today: idle until midnight,
+            # then ensure_new_day() clears the flag and the bot resumes by itself.
+            if bot_status["llm_limit_hit"]:
+                add_log_once(
+                    "LLM limit active - bot paused. It will restart automatically after midnight."
+                )
+                _wait_with_shutdown(600)
+                continue
 
             config = load_config()
             biz_keys = list(config.get("businesses", {}).keys())
@@ -564,13 +617,79 @@ def settings():
         biz["accounts"] = accounts
 
         save_config(config)
-        return jsonify({"success": True, "message": "Settings saved!"})
+        proof = _config_fingerprint()
+        logger.info(f"[SETTINGS] saved. config.json proof: {proof}")
+        return jsonify({
+            "success": True,
+            "message": "Settings saved!",
+            "config": proof,
+        })
 
     return render_template("settings.html", config=config, llm_model=os.environ.get("GROQ_MODEL", "qwen/qwen3.8-27b"))
 
 
-@app.route("/api/switch_business", methods=["POST"])
+def _config_fingerprint():
+    """Proof that config.json on this host changed: mtime + sha256 prefix."""
+    try:
+        with open(CONFIG_PATH, "rb") as handle:
+            data = handle.read()
+        return {
+            "path": CONFIG_PATH,
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest()[:16],
+            "modified": datetime.fromtimestamp(os.path.getmtime(CONFIG_PATH)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+        }
+    except OSError as exc:
+        return {"path": CONFIG_PATH, "error": str(exc)}
+
+
+@app.route("/api/restart", methods=["POST"])
 @require_auth
+def restart_service():
+    """Restart the bot service so fresh settings/code get picked up.
+
+    Settings saved in the UI already land in config.json on the VPS; this
+    endpoint restarts yt-bot (systemd on the VPS, direct process locally) so
+    the running bot reloads both config.json and any updated code.
+    """
+    proof = _config_fingerprint()
+    logger.info(f"[RESTART] requested. config.json proof: {proof}")
+
+    if shutil.which("systemctl"):
+        # Restart the systemd unit. Run detached so this HTTP response can be
+        # sent first; the unit stops us (SIGTERM -> graceful shutdown path).
+        try:
+            subprocess.Popen(
+                ["systemctl", "restart", "yt-bot"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return jsonify({
+                "success": True,
+                "message": "Restarting yt-bot service (systemd)...",
+                "config": proof,
+            })
+        except OSError as exc:
+            logger.error(f"[RESTART] systemctl failed: {exc}")
+            return jsonify({"success": False, "error": f"systemctl restart failed: {exc}",
+                            "config": proof})
+
+    # Local fallback (no systemd): stop the bot loop, the wrapper/`python app.py`
+    # relaunches it. Only restart the loop, keep Flask serving.
+    global shutdown_flag
+    shutdown_flag = True
+    add_log("Restart requested from UI - bot loop stopping, process will exit.")
+    return jsonify({
+        "success": True,
+        "message": "Bot loop stopping (no systemd). Restart the process to resume.",
+        "config": proof,
+    })
+
+
+@app.route("/api/switch_business", methods=["POST"])@require_auth
 def switch_business():
     config = load_config()
     data = request.json
@@ -611,6 +730,8 @@ def get_status():
         "cycle_date": bot_status.get("cycle_date"),
         "current_biz_index": bot_status.get("current_biz_index", 0),
         "total_businesses": len(config.get("businesses", {})),
+        "llm_limit_hit": bot_status.get("llm_limit_hit", False),
+        "llm_limit_message": bot_status.get("llm_limit_message"),
     })
 
 

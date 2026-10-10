@@ -10,7 +10,10 @@
     <div class="container">
         <header>
             <h1>YouTube Auto Comment</h1>
-            <a href="/settings" class="settings-btn">Settings</a>
+            <div class="header-actions">
+                <button id="restartBtn" class="restart-btn" onclick="restartBot()">Restart Bot</button>
+                <a href="/settings" class="settings-btn">Settings</a>
+            </div>
         </header>
 
         <div class="business-switcher">
@@ -21,6 +24,8 @@
             </button>
             {% endfor %}
         </div>
+
+        <div id="llmLimitBanner" class="llm-limit-banner" style="display:none;"></div>
 
         <div class="status-section">
             <div class="status-card">
@@ -88,6 +93,36 @@
             }).then(() => location.reload());
         }
 
+        function restartBot() {
+            const btn = document.getElementById('restartBtn');
+            if (!confirm('Restart the bot? Fresh settings from config.json will be applied.')) return;
+            btn.disabled = true;
+            btn.textContent = 'Restarting...';
+            fetch('/api/restart', {method: 'POST'})
+                .then(r => r.json())
+                .then(d => {
+                    if (d.success) {
+                        let msg = d.message;
+                        if (d.config && !d.config.error) {
+                            msg += '\nconfig.json proof:\n' + d.config.path +
+                                   '\nsha256: ' + d.config.sha256 +
+                                   '\nmodified: ' + d.config.modified;
+                        }
+                        alert(msg + '\n\nPage will reload in 15s.');
+                        setTimeout(() => location.reload(), 15000);
+                    } else {
+                        alert('Restart failed: ' + (d.error || 'unknown'));
+                        btn.disabled = false;
+                        btn.textContent = 'Restart Bot';
+                    }
+                })
+                .catch(e => {
+                    alert('Restart failed: ' + e);
+                    btn.disabled = false;
+                    btn.textContent = 'Restart Bot';
+                });
+        }
+
         function updateStatus() {
             fetch('/api/status')
                 .then(r => r.json())
@@ -96,6 +131,15 @@
                     document.getElementById('status').className = data.running ? 'running' : 'stopped';
                     document.getElementById('today-comments').textContent = data.today_comments + '/' + data.daily_limit;
                     document.getElementById('last-run').textContent = data.last_run || 'Never';
+
+                    const banner = document.getElementById('llmLimitBanner');
+                    if (data.llm_limit_hit) {
+                        banner.textContent = data.llm_limit_message ||
+                            'Ajj ka LLM limit poora ho gaya. Bot kal automatically start hoga.';
+                        banner.style.display = 'block';
+                    } else {
+                        banner.style.display = 'none';
+                    }
 
                     const bizName = document.getElementById('current-biz');
                     if (data.business && BUSINESS_NAMES[data.business]) {

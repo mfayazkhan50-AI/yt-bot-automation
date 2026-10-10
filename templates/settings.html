@@ -173,8 +173,19 @@
                     inactive.forEach(c => c.querySelectorAll('input, textarea, select').forEach(i => i.disabled = false));
                     if (d.success) {
                         const msg = document.getElementById('successMsg');
+                        let text = 'Settings saved to config.json on the server!';
+                        if (d.config && !d.config.error) {
+                            text += ' (' + d.config.modified + ', sha ' + d.config.sha256 + ')';
+                        }
+                        msg.textContent = text;
                         msg.style.display = 'block';
-                        setTimeout(() => msg.style.display = 'none', 3000);
+                        setTimeout(() => msg.style.display = 'none', 6000);
+                        if (d.config && !d.config.error && confirm(text + '\n\nRestart bot now to apply?')) {
+                            fetch('/api/restart', {method: 'POST'})
+                                .then(r => r.json())
+                                .then(rd => alert(rd.success ? rd.message : 'Restart failed: ' + rd.error))
+                                .catch(e => alert('Restart failed: ' + e));
+                        }
                     } else if (d.error) {
                         alert('Error: ' + d.error);
                     }

@@ -18,6 +18,41 @@ MAX_RETRIES = 3
 # so prefer a non-reasoning model for short comments.
 DAILY_TOKEN_BUDGET = 200_000
 
+
+class LLMLimitReached(Exception):
+    """The Groq daily token quota is exhausted - stop generating for today.
+
+    Raised instead of crashing or silently falling back to templates, so the
+    caller (app.py) can show a clear message and pause the bot until tomorrow.
+    """
+
+
+def _is_rate_limit_error(exc):
+    """True for a Groq/OpenAI 429 rate-limit or quota error."""
+    if exc.__class__.__name__ == "RateLimitError":
+        return True
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 429:
+        return True
+    text = str(exc).lower()
+    return "rate limit" in text or "too many requests" in text or "429" in text
+
+
+def _looks_like_daily_limit(exc):
+    """Distinguish the per-day token quota from a transient per-minute limit."""
+    text = str(exc).lower()
+    if any(marker in text for marker in ("per day", "daily", "tokens per day", "tpd", "quota")):
+        return True
+    _reset_usage_if_new_day()
+    return _usage_today["total"] >= DAILY_TOKEN_BUDGET
+
+
+def _daily_budget_exhausted():
+    _reset_usage_if_new_day()
+    return _usage_today["total"] >= DAILY_TOKEN_BUDGET
+
 _usage_today = {"date": None, "prompt": 0, "completion": 0, "total": 0}
 
 
@@ -169,6 +204,10 @@ def _enforce(text, forbidden_terms, required_suffix, max_words):
 
 def _call_llm(messages, max_tokens):
     """Generate a comment via Groq (OpenAI-compatible API). Sole provider."""
+    if _daily_budget_exhausted():
+        raise LLMLimitReached(
+            f"local daily budget hit: {_usage_today['total']}/{DAILY_TOKEN_BUDGET} tokens today"
+        )
     groq_key = os.getenv("GROQ_API_KEY", "").strip()
     if not groq_key:
         logger.warning("[LLM] GROQ_API_KEY is empty - cannot call Groq")
@@ -189,6 +228,15 @@ def _call_llm(messages, max_tokens):
         _record_usage(resp.usage)
         return resp.choices[0].message.content
     except Exception as exc:
+        if _is_rate_limit_error(exc):
+            if _looks_like_daily_limit(exc):
+                raise LLMLimitReached(
+                    f"Groq daily token limit reached: {exc}"
+                ) from exc
+            # Transient per-minute rate limit: back off, then let the caller retry.
+            logger.warning(f"[LLM] Transient rate limit, backing off 10s: {exc}")
+            time.sleep(10)
+            return None
         logger.warning(f"[LLM] Groq failed: {exc}")
         return None
 
@@ -236,6 +284,10 @@ def generate_comment(
                 logger.warning(f"[GENERATOR] attempt {attempt}/{MAX_RETRIES}: {last_error}")
                 time.sleep(1.5 * attempt)
                 continue
+        except LLMLimitReached:
+            # Daily quota exhausted - bubble up so the bot stops gracefully
+            # instead of burning retries or posting template comments.
+            raise
         except Exception as exc:
             last_error = exc
             logger.warning(f"[GENERATOR] attempt {attempt}/{MAX_RETRIES} failed: {exc}")

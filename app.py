@@ -99,6 +99,9 @@ bot_status = {
     # of crashing; ensure_new_day() clears it and the next day starts fresh.
     "today_done": False,
     "today_done_reason": None,
+    # When the YouTube Data API quota runs out, retry at this time (hourly)
+    # instead of waiting for local midnight - quota actually resets ~7-8am PKT.
+    "yt_quota_retry_at": None,
 }
 
 shutdown_flag = False
@@ -279,9 +282,14 @@ def run_bot_cycle(business_key):
 
     if not videos:
         if _video_finder.last_search_quota_exhausted:
-            add_log("YouTube API quota exhausted - today's work is done. Bot will resume tomorrow.")
-            bot_status["today_done"] = True
-            bot_status["today_done_reason"] = "YouTube API quota exhausted"
+            # YouTube Data API quota resets at midnight PACIFIC (~7-8am PKT),
+            # not local midnight. Instead of parking until local midnight,
+            # retry hourly - the first successful search after Pacific midnight
+            # clears the backoff automatically.
+            add_log("YouTube API quota exhausted - will retry in 1 hour (quota resets ~7-8am PKT).")
+            bot_status["yt_quota_retry_at"] = (
+                datetime.now() + timedelta(hours=1)
+            ).isoformat(timespec="seconds")
         else:
             add_log("ERROR: No videos found!")
         return
@@ -427,15 +435,24 @@ def run_bot_cycle(business_key):
             f"{biz['name']} today: {bot_status['daily_counts'][business_key]}/{daily_limit}"
         )
 
+        # Fallback: if this account completely failed (0 OK), log it clearly
+        if results["success"] == 0 and results["failed"] > 0:
+            add_log(f"WARNING: Account {account['email']} failed completely - trying next account if available")
+
         comment_index += len(account_comments)
 
         if comment_index < total_comments and not shutdown_flag:
-            delay = random.uniform(
-                biz.get("delay_min_seconds", 60),
-                biz.get("delay_max_seconds", 120),
-            )
-            add_log(f"Switching accounts in {int(delay)}s...")
-            _wait_with_shutdown(delay)
+            # Check if there are more accounts to try
+            remaining_accounts = len(accounts) - accounts.index(account) - 1
+            if remaining_accounts > 0:
+                delay = random.uniform(
+                    biz.get("delay_min_seconds", 60),
+                    biz.get("delay_max_seconds", 120),
+                )
+                add_log(f"Fallback: switching to next account in {int(delay)}s ({remaining_accounts} account(s) left)...")
+                _wait_with_shutdown(delay)
+            else:
+                add_log("No more accounts to fallback to - moving to next business")
 
     add_log(
         f"Cycle complete. {biz['name']} today: "
@@ -461,9 +478,8 @@ def bot_loop():
             # Midnight: clear every counter and restart the cycle at business1.
             ensure_new_day()
 
-            # LLM daily limit OR YouTube API quota exhausted: idle politely
-            # until midnight. ensure_new_day() clears the flag and the bot
-            # resumes by itself - never crashes.
+            # LLM daily limit: idle politely until midnight. ensure_new_day()
+            # clears the flag and the bot resumes by itself - never crashes.
             if bot_status["today_done"]:
                 reason = bot_status.get("today_done_reason") or "daily limit"
                 add_log_once(
@@ -471,6 +487,18 @@ def bot_loop():
                 )
                 _wait_with_shutdown(600)
                 continue
+
+            # YouTube API quota exhausted: retry hourly (quota resets ~7-8am PKT).
+            yt_retry = bot_status.get("yt_quota_retry_at")
+            if yt_retry:
+                try:
+                    if datetime.fromisoformat(yt_retry) > datetime.now():
+                        add_log_once("YouTube quota backoff active - retrying hourly until reset.")
+                        _wait_with_shutdown(300)
+                        continue
+                except ValueError:
+                    pass
+                bot_status["yt_quota_retry_at"] = None
 
             config = load_config()
             biz_keys = list(config.get("businesses", {}).keys())

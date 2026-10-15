@@ -437,9 +437,11 @@ def run_bot_cycle(business_key):
 
         # Fallback: if this account completely failed (0 OK), log it clearly
         if results["success"] == 0 and results["failed"] > 0:
-            add_log(f"WARNING: Account {account['email']} failed completely - trying next account if available")
+            add_log(f"WARNING: Account {account['email']} failed completely - trying next account with SAME videos")
 
-        comment_index += len(account_comments)
+        # Only advance comment_index by SUCCESSFUL comments.
+        # Failed comments stay in the queue so the next account can retry them.
+        comment_index += results["success"]
 
         if comment_index < total_comments and not shutdown_flag:
             # Check if there are more accounts to try
